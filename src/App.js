@@ -1,5 +1,6 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
-import { RadialBarChart, RadialBar, PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, ReferenceLine } from "recharts";
+import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, ReferenceLine } from "recharts";
+import * as XLSX from "xlsx";
 
 // ─── Palette ────────────────────────────────────────────────
 const C = {
@@ -21,7 +22,7 @@ const C = {
   muted: "#3a4060",
 };
 
-// ─── CSV Parser ──────────────────────────────────────────────
+// ─── DHAN CSV Parser ─────────────────────────────────────────
 function parseDhanCSV(text) {
   const lines = text.split(/\r?\n/);
   let headerIdx = lines.findIndex(l => l.includes("Scrip Name"));
@@ -37,12 +38,16 @@ function parseDhanCSV(text) {
       const pnl = parseFloat(row[8]);
       const pnlPct = parseFloat(row[9]);
       if (isNaN(pnl)) continue;
+      const buyQty = parseFloat(row[1]);
+      const sellQty = parseFloat(row[4]);
       trades.push({
+        broker: "DHAN",
         name: row[0],
-        buyQty: parseFloat(row[1]),
+        qty: sellQty || buyQty || 0,
+        buyQty,
         avgBuy: parseFloat(row[2]),
         buyVal: parseFloat(row[3]),
-        sellQty: parseFloat(row[4]),
+        sellQty,
         avgSell: parseFloat(row[5]),
         sellVal: parseFloat(row[6]),
         pnl,
@@ -51,7 +56,6 @@ function parseDhanCSV(text) {
     } catch {}
   }
 
-  // Extract summary
   const summaryLine = lines.find(l => l.startsWith("Net P&L"));
   let netPnl = 0, brokerage = 0, grossPnl = 0, totalCharges = 0;
   if (summaryLine) {
@@ -62,12 +66,148 @@ function parseDhanCSV(text) {
     totalCharges = parseFloat(parts[7]) || 0;
   }
 
-  // Date range from header
   const headerLine = lines[0] || "";
   const dateMatch = headerLine.match(/From (.+?) to (.+)/);
   const dateRange = dateMatch ? `${dateMatch[1]} – ${dateMatch[2]}` : "Period";
 
-  return { trades, netPnl, brokerage, grossPnl, totalCharges, dateRange };
+  return { broker: "DHAN", trades, netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl: 0, dateRange };
+}
+
+// ─── Zerodha XLSX Parser ─────────────────────────────────────
+function parseZerodhaXLSX(arrayBuffer) {
+  let wb;
+  try { wb = XLSX.read(arrayBuffer, { type: "array" }); }
+  catch { return null; }
+  const sheetName = wb.SheetNames.find(n => /equity/i.test(n)) || wb.SheetNames[0];
+  if (!sheetName) return null;
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+  // Find trade-table header. The xlsx lib strips leading empty columns, so
+  // "Symbol" lands at index 0 (not 1 as seen in the raw xlsx grid).
+  const findHeader = (r) => {
+    if (!r) return false;
+    for (let j = 0; j < Math.min(r.length, 4); j++) {
+      if (r[j] === "Symbol" && r[j + 1] === "ISIN") return j;
+    }
+    return false;
+  };
+  let symbolCol = -1, headerIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    const j = findHeader(rows[i]);
+    if (j !== false) { headerIdx = i; symbolCol = j; break; }
+  }
+  if (headerIdx === -1) return null;
+
+  // Column offsets relative to the Symbol column
+  const C_NAME = symbolCol;
+  const C_QTY = symbolCol + 2;
+  const C_BUY_VAL = symbolCol + 3;
+  const C_SELL_VAL = symbolCol + 4;
+  const C_PNL = symbolCol + 5;
+  const C_PNL_PCT = symbolCol + 6;
+
+  const trades = [];
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r[C_NAME]) continue;
+    const name = String(r[C_NAME]).trim();
+    if (!name) continue;
+    const qty = parseFloat(r[C_QTY]) || 0;
+    const buyVal = parseFloat(r[C_BUY_VAL]) || 0;
+    const sellVal = parseFloat(r[C_SELL_VAL]) || 0;
+    const pnl = parseFloat(r[C_PNL]);
+    const pnlPct = parseFloat(r[C_PNL_PCT]);
+    if (isNaN(pnl)) continue;
+    trades.push({
+      broker: "ZERODHA",
+      name,
+      qty,
+      buyQty: qty,
+      avgBuy: qty ? buyVal / qty : 0,
+      buyVal,
+      sellQty: qty,
+      avgSell: qty ? sellVal / qty : 0,
+      sellVal,
+      pnl,
+      pnlPct: isNaN(pnlPct) ? 0 : pnlPct,
+    });
+  }
+
+  // Summary rows: label in column 0, numeric value in column 1.
+  let realizedPnl = 0, unrealizedPnl = 0, charges = 0, otherCreditDebit = 0, brokerage = 0;
+  let chargesSeen = false;
+  for (const r of rows) {
+    if (!r) continue;
+    // Try both columns 0 and 1 for the label, to be resilient to layout drift.
+    let label = null, valRaw = null;
+    if (typeof r[0] === "string") { label = r[0].trim(); valRaw = r[1]; }
+    else if (typeof r[1] === "string") { label = r[1].trim(); valRaw = r[2]; }
+    const val = parseFloat(valRaw);
+    if (!label || isNaN(val)) continue;
+    if (label === "Realized P&L") realizedPnl = val;
+    else if (label === "Unrealized P&L") unrealizedPnl = val;
+    else if (label === "Charges" && !chargesSeen) { charges = val; chargesSeen = true; }
+    else if (label === "Other Credit & Debit") otherCreditDebit = val;
+    else if (label.startsWith("Brokerage")) brokerage = val;
+  }
+
+  let dateRange = "Period";
+  for (const r of rows) {
+    if (!r) continue;
+    for (const cell of r) {
+      if (typeof cell === "string") {
+        const m = cell.match(/from\s+(.+?)\s+to\s+(.+)/i);
+        if (m) { dateRange = `${m[1].trim()} – ${m[2].trim()}`; break; }
+      }
+    }
+    if (dateRange !== "Period") break;
+  }
+
+  const grossPnl = realizedPnl;
+  const totalCharges = charges - otherCreditDebit; // net debit adds to effective cost
+  const netPnl = grossPnl - totalCharges;
+
+  return { broker: "ZERODHA", trades, netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl, dateRange };
+}
+
+// ─── File Router ─────────────────────────────────────────────
+function parseFile(file) {
+  return new Promise((resolve) => {
+    if (!file) return resolve(null);
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    const isExcel = ext === "xlsx" || ext === "xls";
+    const r = new FileReader();
+    r.onerror = () => resolve(null);
+    r.onload = (e) => {
+      try {
+        if (isExcel) resolve(parseZerodhaXLSX(e.target.result));
+        else resolve(parseDhanCSV(e.target.result));
+      } catch { resolve(null); }
+    };
+    if (isExcel) r.readAsArrayBuffer(file);
+    else r.readAsText(file);
+  });
+}
+
+// ─── Merge datasets for a given tab view ─────────────────────
+function buildActiveDataset(datasets, tab) {
+  const { dhan, zerodha } = datasets;
+  if (tab === "DHAN") return dhan;
+  if (tab === "ZERODHA") return zerodha;
+  const slots = [dhan, zerodha].filter(Boolean);
+  if (slots.length === 0) return null;
+  if (slots.length === 1) return slots[0];
+  return {
+    broker: "ALL",
+    trades: slots.flatMap(s => s.trades),
+    netPnl: slots.reduce((s, d) => s + d.netPnl, 0),
+    brokerage: slots.reduce((s, d) => s + d.brokerage, 0),
+    grossPnl: slots.reduce((s, d) => s + d.grossPnl, 0),
+    totalCharges: slots.reduce((s, d) => s + d.totalCharges, 0),
+    unrealizedPnl: slots.reduce((s, d) => s + (d.unrealizedPnl || 0), 0),
+    dateRange: "Combined",
+  };
 }
 
 function computeMetrics(data) {
@@ -101,7 +241,6 @@ function computeMetrics(data) {
   });
 
   // Cumulative PnL
-  const sorted = [...trades].sort((a, b) => a.pnlPct - b.pnlPct); // approx order
   let cum = 0;
   const cumPnl = trades.map((t, i) => { cum += t.pnl; return { trade: i + 1, pnl: +cum.toFixed(0) }; });
 
@@ -175,15 +314,11 @@ function UploadScreen({ onData }) {
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef();
 
-  const handle = (file) => {
+  const handle = async (file) => {
     if (!file) return;
-    const r = new FileReader();
-    r.onload = (e) => {
-      const parsed = parseDhanCSV(e.target.result);
-      if (parsed && parsed.trades.length > 0) onData(parsed);
-      else alert("Could not parse file. Please upload a valid Dhan P&L CSV.");
-    };
-    r.readAsText(file);
+    const parsed = await parseFile(file);
+    if (parsed && parsed.trades.length > 0) onData(parsed);
+    else alert("Could not parse file. Upload a Dhan P&L CSV or a Zerodha P&L XLSX.");
   };
 
   return (
@@ -215,7 +350,7 @@ function UploadScreen({ onData }) {
           Turn your trades into<br /><span style={{ color: C.accent }}>actionable insights</span>
         </h1>
         <p style={{ color: C.sub, fontSize: 14, lineHeight: 1.7, marginBottom: 40 }}>
-          Upload your Dhan P&L CSV export. Your data stays in your browser — nothing is uploaded to any server. Drop a new file anytime to refresh.
+          Upload your Dhan P&L CSV or Zerodha P&L XLSX. Upload both to see a combined view. Your data stays in your browser — nothing is uploaded to any server.
         </p>
 
         {/* Drop zone */}
@@ -233,10 +368,10 @@ function UploadScreen({ onData }) {
         >
           <div style={{ fontSize: 36, marginBottom: 14 }}>{dragging ? "📂" : "📊"}</div>
           <div style={{ fontWeight: 700, fontSize: 16, color: C.text, marginBottom: 8 }}>
-            {dragging ? "Drop it!" : "Drop your Dhan P&L CSV here"}
+            {dragging ? "Drop it!" : "Drop your Dhan CSV or Zerodha XLSX here"}
           </div>
           <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: C.sub }}>or click to browse files</div>
-          <input ref={inputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={e => handle(e.target.files[0])} />
+          <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={e => handle(e.target.files[0])} />
         </div>
 
         <div style={{ marginTop: 20, display: "flex", gap: 20, justifyContent: "center" }}>
@@ -246,14 +381,21 @@ function UploadScreen({ onData }) {
         </div>
 
         {/* How to export */}
-        <div style={{ marginTop: 40, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px" }}>
-          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.accent, marginBottom: 12, textTransform: "uppercase" }}>How to export from Dhan</div>
-          {["Open Dhan app or website", "Go to Reports → P&L Statement", "Set your date range", "Click Export → Download CSV", "Drop the file above"].map((s, i) => (
-            <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 8 }}>
-              <div style={{ width: 20, height: 20, borderRadius: "50%", background: C.accentDim, border: `1px solid ${C.accent}40`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.accent }}>{i + 1}</span>
-              </div>
-              <div style={{ fontSize: 13, color: C.sub, paddingTop: 2 }}>{s}</div>
+        <div className="grid2" style={{ marginTop: 40, gap: 14 }}>
+          {[
+            { label: "Export from Dhan", steps: ["Open Dhan app or website", "Reports → P&L Statement", "Set your date range", "Export → Download CSV"] },
+            { label: "Export from Zerodha Console", steps: ["Login to console.zerodha.com", "Reports → P&L", "Select segment & date range", "Download → XLSX"] },
+          ].map(({ label, steps }) => (
+            <div key={label} style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 10, padding: "18px 22px" }}>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.accent, marginBottom: 12, textTransform: "uppercase" }}>{label}</div>
+              {steps.map((s, i) => (
+                <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 8 }}>
+                  <div style={{ width: 20, height: 20, borderRadius: "50%", background: C.accentDim, border: `1px solid ${C.accent}40`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.accent }}>{i + 1}</span>
+                  </div>
+                  <div style={{ fontSize: 13, color: C.sub, paddingTop: 2 }}>{s}</div>
+                </div>
+              ))}
             </div>
           ))}
         </div>
@@ -263,19 +405,48 @@ function UploadScreen({ onData }) {
 }
 
 // ─── Dashboard ───────────────────────────────────────────────
-function Dashboard({ rawData, onReset }) {
-  const m = useMemo(() => computeMetrics(rawData), [rawData]);
+const BROKER_META = {
+  DHAN: { label: "Dhan", color: "#4488ff" },
+  ZERODHA: { label: "Zerodha", color: "#a855f7" },
+  ALL: { label: "Combined", color: "#e8b84b" },
+};
+
+function Dashboard({ datasets, onUpdate, onReset }) {
   const inputRef = useRef();
 
-  const handleNewFile = (file) => {
+  const availableTabs = useMemo(() => {
+    const tabs = [];
+    if (datasets.dhan && datasets.zerodha) tabs.push("ALL");
+    if (datasets.dhan) tabs.push("DHAN");
+    if (datasets.zerodha) tabs.push("ZERODHA");
+    return tabs;
+  }, [datasets]);
+
+  const [tab, setTab] = useState(availableTabs[0] || "DHAN");
+
+  useEffect(() => {
+    if (!availableTabs.includes(tab)) setTab(availableTabs[0]);
+    // auto-promote to ALL once both are present
+    else if (datasets.dhan && datasets.zerodha && tab !== "ALL") setTab("ALL");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [datasets.dhan, datasets.zerodha]);
+
+  const activeData = useMemo(() => buildActiveDataset(datasets, tab), [datasets, tab]);
+  const m = useMemo(() => activeData ? computeMetrics(activeData) : null, [activeData]);
+
+  const totalNet = (datasets.dhan?.netPnl || 0) + (datasets.zerodha?.netPnl || 0);
+  const totalCharges = (datasets.dhan?.totalCharges || 0) + (datasets.zerodha?.totalCharges || 0);
+  const totalUnrealized = datasets.zerodha?.unrealizedPnl || 0;
+  const totalTrades = (datasets.dhan?.trades.length || 0) + (datasets.zerodha?.trades.length || 0);
+
+  const handleNewFile = async (file) => {
     if (!file) return;
-    const r = new FileReader();
-    r.onload = (e) => {
-      const parsed = parseDhanCSV(e.target.result);
-      if (parsed && parsed.trades.length > 0) onReset(parsed);
-    };
-    r.readAsText(file);
+    const parsed = await parseFile(file);
+    if (parsed && parsed.trades.length > 0) onUpdate(parsed);
+    else alert("Could not parse file. Upload a Dhan P&L CSV or a Zerodha P&L XLSX.");
   };
+
+  if (!m) return null;
 
   const winRatePieData = [
     { name: "Win", value: m.winners.length },
@@ -347,7 +518,7 @@ function Dashboard({ rawData, onReset }) {
       <div style={{ maxWidth: 1120, margin: "0 auto" }}>
 
         {/* Header */}
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 40, flexWrap: "wrap", gap: 20, animation: "fadeUp 0.4s ease both" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 24, flexWrap: "wrap", gap: 20, animation: "fadeUp 0.4s ease both" }}>
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
               <div style={{ width: 32, height: 32, background: C.accentDim, border: `1px solid ${C.accent}50`, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>◈</div>
@@ -357,19 +528,19 @@ function Dashboard({ rawData, onReset }) {
               Your Trading <span style={{ color: C.accent }}>Dashboard</span>
             </h1>
             <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: C.sub, marginTop: 8 }}>
-              {rawData.dateRange} · {m.trades.length} trades · {fmt(m.totalCapital)} deployed
+              {activeData.dateRange} · {m.trades.length} trades · {fmt(m.totalCapital)} deployed
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             <div style={{
               fontFamily: "'DM Mono', monospace", fontSize: 11,
               padding: "8px 14px", borderRadius: 6,
-              background: m.netPnl >= 0 ? C.greenDim : C.redDim,
-              border: `1px solid ${m.netPnl >= 0 ? C.green : C.red}40`,
-              color: m.netPnl >= 0 ? C.green : C.red,
+              background: totalNet >= 0 ? C.greenDim : C.redDim,
+              border: `1px solid ${totalNet >= 0 ? C.green : C.red}40`,
+              color: totalNet >= 0 ? C.green : C.red,
               fontWeight: 500,
             }}>
-              NET {m.netPnl >= 0 ? "+" : ""}{fmt(m.netPnl)}
+              TOTAL {totalNet >= 0 ? "+" : ""}{fmt(totalNet)}
             </div>
             <button
               className="upload-btn"
@@ -380,9 +551,87 @@ function Dashboard({ rawData, onReset }) {
                 background: C.card, border: `1px solid ${C.border}`, color: C.sub,
                 transition: "all 0.2s",
               }}>
-              ↑ New File
+              ↑ Upload File
             </button>
-            <input ref={inputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={e => handleNewFile(e.target.files[0])} />
+            <button
+              className="upload-btn"
+              onClick={onReset}
+              style={{
+                fontFamily: "'DM Mono', monospace", fontSize: 11, letterSpacing: "1px",
+                padding: "8px 14px", borderRadius: 6, cursor: "pointer",
+                background: "transparent", border: `1px solid ${C.border}`, color: C.muted,
+                transition: "all 0.2s",
+              }}>
+              Clear
+            </button>
+            <input ref={inputRef} type="file" accept=".csv,.xlsx,.xls" style={{ display: "none" }} onChange={e => handleNewFile(e.target.files[0])} />
+          </div>
+        </div>
+
+        {/* Accounts Strip — always-visible totals across both brokers */}
+        <SectionTitle>Accounts · All Brokers</SectionTitle>
+        <div className="grid4" style={{ marginBottom: 8 }}>
+          <StatCard
+            label="Dhan Net P&L"
+            value={datasets.dhan ? fmt(datasets.dhan.netPnl) : "—"}
+            sub={datasets.dhan ? `${datasets.dhan.trades.length} trades` : "not uploaded"}
+            color={!datasets.dhan ? C.muted : datasets.dhan.netPnl >= 0 ? C.green : C.red}
+            accent delay={50}
+          />
+          <StatCard
+            label="Zerodha Net P&L"
+            value={datasets.zerodha ? fmt(datasets.zerodha.netPnl) : "—"}
+            sub={datasets.zerodha ? `${datasets.zerodha.trades.length} trades` : "not uploaded"}
+            color={!datasets.zerodha ? C.muted : datasets.zerodha.netPnl >= 0 ? C.green : C.red}
+            accent delay={100}
+          />
+          <StatCard
+            label="Combined Net P&L"
+            value={fmt(totalNet)}
+            sub={`${totalTrades} trades · ${fmt(totalCharges)} charges`}
+            color={totalNet >= 0 ? C.green : C.red}
+            accent delay={150}
+          />
+          <StatCard
+            label="Unrealized (Zerodha)"
+            value={datasets.zerodha ? fmt(totalUnrealized) : "—"}
+            sub="open holdings · not in net"
+            color={!datasets.zerodha ? C.muted : totalUnrealized >= 0 ? C.green : C.red}
+            accent delay={200}
+          />
+        </div>
+
+        {/* Tabs */}
+        <div style={{ display: "flex", gap: 8, marginTop: 24, marginBottom: 12, flexWrap: "wrap", borderBottom: `1px solid ${C.border}`, paddingBottom: 0 }}>
+          {["ALL", "DHAN", "ZERODHA"].map(k => {
+            const enabled = availableTabs.includes(k);
+            const active = tab === k;
+            const meta = BROKER_META[k];
+            return (
+              <button
+                key={k}
+                disabled={!enabled}
+                onClick={() => enabled && setTab(k)}
+                style={{
+                  fontFamily: "'DM Mono', monospace", fontSize: 11, letterSpacing: "2px",
+                  padding: "10px 18px", borderRadius: "6px 6px 0 0",
+                  cursor: enabled ? "pointer" : "not-allowed",
+                  background: active ? C.card : "transparent",
+                  border: `1px solid ${active ? C.border : "transparent"}`,
+                  borderBottom: active ? `1px solid ${C.card}` : "1px solid transparent",
+                  marginBottom: -1,
+                  color: !enabled ? C.muted : active ? meta.color : C.sub,
+                  textTransform: "uppercase", fontWeight: active ? 700 : 500,
+                  opacity: enabled ? 1 : 0.4,
+                  transition: "all 0.15s",
+                }}>
+                {meta.label}{!enabled && " · upload"}
+              </button>
+            );
+          })}
+          <div style={{ flex: 1 }} />
+          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.muted, alignSelf: "center", padding: "0 8px" }}>
+            viewing: <span style={{ color: BROKER_META[tab].color }}>{BROKER_META[tab].label}</span>
           </div>
         </div>
 
@@ -584,7 +833,7 @@ function Dashboard({ rawData, onReset }) {
         </div>
 
         <div style={{ textAlign: "center", fontFamily: "'DM Mono', monospace", fontSize: 11, color: C.muted, paddingBottom: 20 }}>
-          TradeScope · Data stays in your browser · Drop a new CSV anytime to refresh
+          TradeScope · Data stays in your browser · Drop a Dhan CSV or Zerodha XLSX anytime
         </div>
       </div>
     </div>
@@ -593,7 +842,14 @@ function Dashboard({ rawData, onReset }) {
 
 // ─── App Root ────────────────────────────────────────────────
 export default function App() {
-  const [data, setData] = useState(null);
-  if (!data) return <UploadScreen onData={setData} />;
-  return <Dashboard rawData={data} onReset={setData} />;
+  const [datasets, setDatasets] = useState({ dhan: null, zerodha: null });
+  const updateDataset = useCallback((d) => {
+    if (!d || !d.broker) return;
+    const key = d.broker.toLowerCase();
+    setDatasets(prev => ({ ...prev, [key]: d }));
+  }, []);
+  const reset = useCallback(() => setDatasets({ dhan: null, zerodha: null }), []);
+  const hasAny = datasets.dhan || datasets.zerodha;
+  if (!hasAny) return <UploadScreen onData={updateDataset} />;
+  return <Dashboard datasets={datasets} onUpdate={updateDataset} onReset={reset} />;
 }

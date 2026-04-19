@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tradescope",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["start"],
+      "env": { "PORT": "3456", "BROWSER": "none" },
+      "port": 3456
+    }
+  ]
+}
