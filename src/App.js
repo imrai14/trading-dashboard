@@ -70,7 +70,20 @@ function parseDhanCSV(text) {
   const dateMatch = headerLine.match(/From (.+?) to (.+)/);
   const dateRange = dateMatch ? `${dateMatch[1]} – ${dateMatch[2]}` : "Period";
 
-  return { broker: "DHAN", trades, netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl: 0, dateRange };
+  // Dhan only exposes brokerage + a lumped "other charges" in the summary row,
+  // so the breakdown is intentionally coarse.
+  const otherCharges = Math.max(0, totalCharges - brokerage);
+  const chargesBreakdown = [
+    { label: "Brokerage", amount: brokerage },
+    { label: "STT / Exchange / Other", amount: otherCharges },
+  ].filter(x => x.amount > 0);
+
+  return {
+    broker: "DHAN",
+    trades, holdings: [], chargesBreakdown,
+    netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl: 0,
+    dateRange,
+  };
 }
 
 // ─── Zerodha XLSX Parser ─────────────────────────────────────
@@ -106,8 +119,13 @@ function parseZerodhaXLSX(arrayBuffer) {
   const C_SELL_VAL = symbolCol + 4;
   const C_PNL = symbolCol + 5;
   const C_PNL_PCT = symbolCol + 6;
+  const C_OPEN_QTY = symbolCol + 8;
+  const C_OPEN_VAL = symbolCol + 10;
+  const C_UNREALIZED = symbolCol + 11;
+  const C_UNREALIZED_PCT = symbolCol + 12;
 
   const trades = [];
+  const holdings = [];
   for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || !r[C_NAME]) continue;
@@ -118,20 +136,28 @@ function parseZerodhaXLSX(arrayBuffer) {
     const sellVal = parseFloat(r[C_SELL_VAL]) || 0;
     const pnl = parseFloat(r[C_PNL]);
     const pnlPct = parseFloat(r[C_PNL_PCT]);
-    if (isNaN(pnl)) continue;
-    trades.push({
-      broker: "ZERODHA",
-      name,
-      qty,
-      buyQty: qty,
-      avgBuy: qty ? buyVal / qty : 0,
-      buyVal,
-      sellQty: qty,
-      avgSell: qty ? sellVal / qty : 0,
-      sellVal,
-      pnl,
-      pnlPct: isNaN(pnlPct) ? 0 : pnlPct,
-    });
+    const openQty = parseFloat(r[C_OPEN_QTY]) || 0;
+    const openValue = parseFloat(r[C_OPEN_VAL]) || 0;
+    const uPnl = parseFloat(r[C_UNREALIZED]) || 0;
+    const uPnlPct = parseFloat(r[C_UNREALIZED_PCT]) || 0;
+    if (!isNaN(pnl) && qty > 0) {
+      trades.push({
+        broker: "ZERODHA",
+        name,
+        qty,
+        buyQty: qty,
+        avgBuy: qty ? buyVal / qty : 0,
+        buyVal,
+        sellQty: qty,
+        avgSell: qty ? sellVal / qty : 0,
+        sellVal,
+        pnl,
+        pnlPct: isNaN(pnlPct) ? 0 : pnlPct,
+      });
+    }
+    if (openQty > 0) {
+      holdings.push({ broker: "ZERODHA", name, openQty, openValue, unrealizedPnl: uPnl, unrealizedPnlPct: uPnlPct });
+    }
   }
 
   // Summary rows: label in column 0, numeric value in column 1.
@@ -139,7 +165,6 @@ function parseZerodhaXLSX(arrayBuffer) {
   let chargesSeen = false;
   for (const r of rows) {
     if (!r) continue;
-    // Try both columns 0 and 1 for the label, to be resilient to layout drift.
     let label = null, valRaw = null;
     if (typeof r[0] === "string") { label = r[0].trim(); valRaw = r[1]; }
     else if (typeof r[1] === "string") { label = r[1].trim(); valRaw = r[2]; }
@@ -150,6 +175,30 @@ function parseZerodhaXLSX(arrayBuffer) {
     else if (label === "Charges" && !chargesSeen) { charges = val; chargesSeen = true; }
     else if (label === "Other Credit & Debit") otherCreditDebit = val;
     else if (label.startsWith("Brokerage")) brokerage = val;
+  }
+
+  // Itemized charges: rows after the "Account Head / Amount" header.
+  const chargesBreakdown = [];
+  const accountHeadIdx = rows.findIndex(r => r && r[0] === "Account Head" && r[1] === "Amount");
+  if (accountHeadIdx !== -1) {
+    for (let i = accountHeadIdx + 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r || typeof r[0] !== "string") {
+        if (r && r.every(c => c === null || c === "")) continue;
+        if (!r) continue;
+        break;
+      }
+      const raw = r[0].trim();
+      if (!raw) break;
+      const amt = parseFloat(r[1]);
+      if (isNaN(amt)) continue;
+      const label = raw.replace(/\s*-\s*Z$/, "").trim();
+      chargesBreakdown.push({ label, amount: amt });
+    }
+  }
+  // Fold the "Other Credit & Debit" net debit into the breakdown so totals reconcile.
+  if (otherCreditDebit < 0) {
+    chargesBreakdown.push({ label: "DP & Other Debits", amount: -otherCreditDebit });
   }
 
   let dateRange = "Period";
@@ -165,10 +214,15 @@ function parseZerodhaXLSX(arrayBuffer) {
   }
 
   const grossPnl = realizedPnl;
-  const totalCharges = charges - otherCreditDebit; // net debit adds to effective cost
+  const totalCharges = charges - otherCreditDebit;
   const netPnl = grossPnl - totalCharges;
 
-  return { broker: "ZERODHA", trades, netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl, dateRange };
+  return {
+    broker: "ZERODHA",
+    trades, holdings, chargesBreakdown,
+    netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl,
+    dateRange,
+  };
 }
 
 // ─── File Router ─────────────────────────────────────────────
@@ -198,9 +252,19 @@ function buildActiveDataset(datasets, tab) {
   const slots = [dhan, zerodha].filter(Boolean);
   if (slots.length === 0) return null;
   if (slots.length === 1) return slots[0];
+
+  // Merge itemized charges by label so a combined breakdown reconciles.
+  const mergedCharges = {};
+  for (const s of slots) for (const c of (s.chargesBreakdown || [])) {
+    mergedCharges[c.label] = (mergedCharges[c.label] || 0) + c.amount;
+  }
+  const chargesBreakdown = Object.entries(mergedCharges).map(([label, amount]) => ({ label, amount }));
+
   return {
     broker: "ALL",
     trades: slots.flatMap(s => s.trades),
+    holdings: slots.flatMap(s => s.holdings || []),
+    chargesBreakdown,
     netPnl: slots.reduce((s, d) => s + d.netPnl, 0),
     brokerage: slots.reduce((s, d) => s + d.brokerage, 0),
     grossPnl: slots.reduce((s, d) => s + d.grossPnl, 0),
@@ -208,6 +272,18 @@ function buildActiveDataset(datasets, tab) {
     unrealizedPnl: slots.reduce((s, d) => s + (d.unrealizedPnl || 0), 0),
     dateRange: "Combined",
   };
+}
+
+// Derive number of months from a "YYYY-MM-DD – YYYY-MM-DD" range.
+function monthsFromRange(range) {
+  if (!range || range === "Period" || range === "Combined") return 0;
+  const m = range.match(/(\d{4}-\d{1,2}-\d{1,2})[^\d]+(\d{4}-\d{1,2}-\d{1,2})/);
+  if (!m) return 0;
+  const d1 = new Date(m[1]);
+  const d2 = new Date(m[2]);
+  if (isNaN(d1) || isNaN(d2)) return 0;
+  const days = (d2 - d1) / (1000 * 60 * 60 * 24);
+  return Math.max(days / 30, 0.25); // floor at ~1 week for sanity
 }
 
 function computeMetrics(data) {
@@ -272,6 +348,42 @@ function StatCard({ label, value, sub, color = C.text, accent = false, delay = 0
       <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase", marginBottom: 10 }}>{label}</div>
       <div style={{ fontSize: 26, fontWeight: 800, color, letterSpacing: "-0.5px", fontFamily: "'Clash Display', 'Roboto', sans-serif" }}>{value}</div>
       {sub && <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: C.muted, marginTop: 5 }}>{sub}</div>}
+    </div>
+  );
+}
+
+function BrokerCard({ label, data, onRemove, delay = 0 }) {
+  const loaded = !!data;
+  const color = !loaded ? C.muted : data.netPnl >= 0 ? C.green : C.red;
+  return (
+    <div style={{
+      background: C.card, border: `1px solid ${C.border}`, borderRadius: 10,
+      padding: "20px 22px", position: "relative", overflow: "hidden",
+      animation: `fadeUp 0.5s ease both`, animationDelay: `${delay}ms`,
+    }}>
+      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: color, borderRadius: "10px 10px 0 0" }} />
+      {loaded && (
+        <button
+          onClick={onRemove}
+          title={`Remove ${label}`}
+          style={{
+            position: "absolute", top: 8, right: 10,
+            width: 22, height: 22, borderRadius: 4,
+            background: "transparent", border: "none", cursor: "pointer",
+            color: C.muted, fontSize: 14, lineHeight: 1,
+            transition: "all 0.15s",
+          }}
+          onMouseEnter={e => { e.currentTarget.style.color = C.red; }}
+          onMouseLeave={e => { e.currentTarget.style.color = C.muted; }}
+        >×</button>
+      )}
+      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase", marginBottom: 10 }}>{label}</div>
+      <div style={{ fontSize: 26, fontWeight: 800, color, letterSpacing: "-0.5px", fontFamily: "'Clash Display', 'Roboto', sans-serif" }}>
+        {loaded ? fmt(data.netPnl) : "—"}
+      </div>
+      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 11, color: C.muted, marginTop: 5 }}>
+        {loaded ? `${data.trades.length} trades · ${data.dateRange}` : "not uploaded"}
+      </div>
     </div>
   );
 }
@@ -411,7 +523,7 @@ const BROKER_META = {
   ALL: { label: "Combined", color: "#e8b84b" },
 };
 
-function Dashboard({ datasets, onUpdate, onReset }) {
+function Dashboard({ datasets, onUpdate, onRemove, onReset }) {
   const inputRef = useRef();
 
   const availableTabs = useMemo(() => {
@@ -453,6 +565,8 @@ function Dashboard({ datasets, onUpdate, onReset }) {
     { name: "Loss", value: m.losers.length },
   ];
 
+  const months = monthsFromRange(activeData.dateRange);
+
   const insights = [
     {
       badge: m.winRate < 35 ? "🔴 Critical" : "🟡 Monitor",
@@ -479,7 +593,7 @@ function Dashboard({ datasets, onUpdate, onReset }) {
       badge: m.chargesPct > 30 ? "🟡 Warning" : "✅ Okay",
       badgeColor: m.chargesPct > 30 ? C.accent : C.green,
       title: `Charges Eating ${fmtNum(m.chargesPct)}% of Your Net Loss`,
-      body: `You paid <strong>${fmt(m.totalCharges)}</strong> in brokerage + STT + exchange fees across ${m.trades.length} trades. That's ~<strong>${fmt(m.totalCharges / m.trades.length)}/trade</strong>. Reduce trade frequency — aim for 4–5 high-conviction trades/month instead of ${(m.trades.length / 11).toFixed(0)}/month.`,
+      body: `You paid <strong>${fmt(m.totalCharges)}</strong> in brokerage + STT + exchange fees across ${m.trades.length} trades. That's ~<strong>${fmt(m.totalCharges / Math.max(m.trades.length, 1))}/trade</strong>.${months >= 1 ? ` Reduce trade frequency — aim for 4–5 high-conviction trades/month instead of ${(m.trades.length / months).toFixed(1)}/month.` : ""}`,
       num: "04",
     },
     {
@@ -571,19 +685,17 @@ function Dashboard({ datasets, onUpdate, onReset }) {
         {/* Accounts Strip — always-visible totals across both brokers */}
         <SectionTitle>Accounts · All Brokers</SectionTitle>
         <div className="grid4" style={{ marginBottom: 8 }}>
-          <StatCard
+          <BrokerCard
             label="Dhan Net P&L"
-            value={datasets.dhan ? fmt(datasets.dhan.netPnl) : "—"}
-            sub={datasets.dhan ? `${datasets.dhan.trades.length} trades` : "not uploaded"}
-            color={!datasets.dhan ? C.muted : datasets.dhan.netPnl >= 0 ? C.green : C.red}
-            accent delay={50}
+            data={datasets.dhan}
+            onRemove={() => onRemove("DHAN")}
+            delay={50}
           />
-          <StatCard
+          <BrokerCard
             label="Zerodha Net P&L"
-            value={datasets.zerodha ? fmt(datasets.zerodha.netPnl) : "—"}
-            sub={datasets.zerodha ? `${datasets.zerodha.trades.length} trades` : "not uploaded"}
-            color={!datasets.zerodha ? C.muted : datasets.zerodha.netPnl >= 0 ? C.green : C.red}
-            accent delay={100}
+            data={datasets.zerodha}
+            onRemove={() => onRemove("ZERODHA")}
+            delay={100}
           />
           <StatCard
             label="Combined Net P&L"
@@ -714,7 +826,12 @@ function Dashboard({ datasets, onUpdate, onReset }) {
 
         {/* Cumulative PnL Chart */}
         <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 24, marginBottom: 20, animation: "fadeUp 0.5s ease both", animationDelay: "300ms" }}>
-          <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase", marginBottom: 20 }}>Cumulative P&L Curve (Gross)</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase" }}>Cumulative P&L · by Trade Sequence</div>
+            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 9, color: C.muted }} title="Trade timestamps are not in the P&L export; this is the order in which trades appear in the file, not chronological.">
+              ⓘ file order, not chronological
+            </div>
+          </div>
           <ResponsiveContainer width="100%" height={180}>
             <LineChart data={m.cumPnl}>
               <CartesianGrid stroke={C.border} strokeDasharray="3 3" vertical={false} />
@@ -759,6 +876,80 @@ function Dashboard({ datasets, onUpdate, onReset }) {
             </div>
           ))}
         </div>
+
+        {/* Holdings + Charges Breakdown (shown when the active dataset has them) */}
+        {(activeData.holdings?.length > 0 || activeData.chargesBreakdown?.length > 0) && (
+          <>
+            <SectionTitle>Holdings & Charges</SectionTitle>
+            <div className="grid2" style={{ marginBottom: 20 }}>
+              {/* Open Positions */}
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 22 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase" }}>Open Positions</div>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: activeData.unrealizedPnl >= 0 ? C.green : C.red }}>
+                    {activeData.unrealizedPnl >= 0 ? "+" : ""}{fmt(activeData.unrealizedPnl || 0)} unrealized
+                  </div>
+                </div>
+                {activeData.holdings?.length > 0 ? (
+                  activeData.holdings.slice(0, 8).map((h, i) => (
+                    <div key={i} className="trade-row" style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "10px 12px", borderRadius: 6, marginBottom: 5,
+                      background: "#0d1020",
+                      borderLeft: `3px solid ${h.unrealizedPnl >= 0 ? C.green : C.red}`,
+                      transition: "background 0.15s",
+                    }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{h.name}</div>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.muted, marginTop: 2 }}>
+                          {h.openQty} @ {fmt(h.openValue / Math.max(h.openQty, 1))}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 13, color: h.unrealizedPnl >= 0 ? C.green : C.red, fontWeight: 500 }}>
+                          {h.unrealizedPnl >= 0 ? "+" : ""}{fmt(h.unrealizedPnl)}
+                        </div>
+                        <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.muted }}>
+                          {h.unrealizedPnlPct >= 0 ? "+" : ""}{fmtNum(h.unrealizedPnlPct)}%
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ fontSize: 12.5, color: C.muted, lineHeight: 1.6, padding: "8px 4px" }}>
+                    No per-symbol holdings in this export.{activeData.unrealizedPnl ? ` The ${fmt(activeData.unrealizedPnl)} unrealized P&L in the summary reflects open positions not itemized here — check your Zerodha Holdings report for details.` : ""}
+                  </div>
+                )}
+              </div>
+
+              {/* Charges Breakdown */}
+              <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: 22 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.sub, textTransform: "uppercase" }}>Charges Breakdown</div>
+                  <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.accent }}>
+                    {fmt(activeData.totalCharges)} total
+                  </div>
+                </div>
+                {(() => {
+                  const rows = (activeData.chargesBreakdown || []).filter(c => c.amount > 0).sort((a, b) => b.amount - a.amount);
+                  const max = rows.reduce((s, r) => Math.max(s, r.amount), 0) || 1;
+                  if (rows.length === 0) return <div style={{ fontSize: 12.5, color: C.muted }}>No itemized charges available.</div>;
+                  return rows.map((c, i) => (
+                    <div key={i} style={{ marginBottom: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
+                        <span style={{ fontSize: 12.5, color: C.sub }}>{c.label}</span>
+                        <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 12, color: C.text }}>{fmt(c.amount)}</span>
+                      </div>
+                      <div style={{ height: 5, background: C.border, borderRadius: 3 }}>
+                        <div style={{ width: `${(c.amount / max) * 100}%`, height: "100%", background: C.accent, borderRadius: 3 }} />
+                      </div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          </>
+        )}
 
         {/* P&L Breakdown */}
         <SectionTitle>P&L & Cost Breakdown</SectionTitle>
@@ -841,15 +1032,44 @@ function Dashboard({ datasets, onUpdate, onReset }) {
 }
 
 // ─── App Root ────────────────────────────────────────────────
+const STORAGE_KEY = "tradescope:datasets:v1";
+
+function loadDatasets() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { dhan: null, zerodha: null };
+    const parsed = JSON.parse(raw);
+    return {
+      dhan: parsed.dhan || null,
+      zerodha: parsed.zerodha || null,
+    };
+  } catch { return { dhan: null, zerodha: null }; }
+}
+
 export default function App() {
-  const [datasets, setDatasets] = useState({ dhan: null, zerodha: null });
+  const [datasets, setDatasets] = useState(loadDatasets);
+
+  useEffect(() => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(datasets)); }
+    catch { /* quota or disabled — ignore */ }
+  }, [datasets]);
+
   const updateDataset = useCallback((d) => {
     if (!d || !d.broker) return;
     const key = d.broker.toLowerCase();
     setDatasets(prev => ({ ...prev, [key]: d }));
   }, []);
-  const reset = useCallback(() => setDatasets({ dhan: null, zerodha: null }), []);
+  const removeBroker = useCallback((broker) => {
+    const key = broker.toLowerCase();
+    setDatasets(prev => ({ ...prev, [key]: null }));
+  }, []);
+  const reset = useCallback(() => {
+    if (window.confirm("Clear all uploaded data? This cannot be undone.")) {
+      setDatasets({ dhan: null, zerodha: null });
+    }
+  }, []);
+
   const hasAny = datasets.dhan || datasets.zerodha;
   if (!hasAny) return <UploadScreen onData={updateDataset} />;
-  return <Dashboard datasets={datasets} onUpdate={updateDataset} onReset={reset} />;
+  return <Dashboard datasets={datasets} onUpdate={updateDataset} onRemove={removeBroker} onReset={reset} />;
 }
