@@ -1,6 +1,8 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
+import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, ReferenceLine } from "recharts";
 import * as XLSX from "xlsx";
+import SwingTracker from "./SwingTracker";
 
 // ─── Palette ────────────────────────────────────────────────
 const C = {
@@ -447,14 +449,26 @@ function UploadScreen({ onData }) {
 
       <div style={{ maxWidth: 520, width: "100%", animation: "fadeUp 0.6s ease both" }}>
         {/* Logo mark */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 48 }}>
-          <div style={{ width: 36, height: 36, background: C.accentDim, border: `1px solid ${C.accent}40`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
-            <span style={{ fontSize: 18 }}>◈</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 48, justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 36, height: 36, background: C.accentDim, border: `1px solid ${C.accent}40`, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <span style={{ fontSize: 18 }}>◈</span>
+            </div>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 16, color: C.text, letterSpacing: "-0.3px" }}>TradeScope</div>
+              <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.sub, letterSpacing: "1px" }}>SWING ANALYTICS</div>
+            </div>
           </div>
-          <div>
-            <div style={{ fontWeight: 800, fontSize: 16, color: C.text, letterSpacing: "-0.3px" }}>TradeScope</div>
-            <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, color: C.sub, letterSpacing: "1px" }}>SWING ANALYTICS</div>
-          </div>
+          <Link
+            to="/swing"
+            style={{
+              fontFamily: "'DM Mono', monospace", fontSize: 11, letterSpacing: "1px",
+              padding: "8px 14px", borderRadius: 6,
+              background: C.card, border: `1px solid ${C.border}`, color: C.sub,
+              textDecoration: "none",
+            }}>
+            Swing Tracker →
+          </Link>
         </div>
 
         <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 10, letterSpacing: "2px", color: C.accent, marginBottom: 14, textTransform: "uppercase" }}>Upload Your Trade Log</div>
@@ -656,6 +670,17 @@ function Dashboard({ datasets, onUpdate, onRemove, onReset }) {
             }}>
               TOTAL {totalNet >= 0 ? "+" : ""}{fmt(totalNet)}
             </div>
+            <Link
+              to="/swing"
+              className="upload-btn"
+              style={{
+                fontFamily: "'DM Mono', monospace", fontSize: 11, letterSpacing: "1px",
+                padding: "8px 14px", borderRadius: 6,
+                background: C.card, border: `1px solid ${C.border}`, color: C.sub,
+                textDecoration: "none", transition: "all 0.2s",
+              }}>
+              Swing Tracker →
+            </Link>
             <button
               className="upload-btn"
               onClick={() => inputRef.current?.click()}
@@ -1046,7 +1071,7 @@ function loadDatasets() {
   } catch { return { dhan: null, zerodha: null }; }
 }
 
-export default function App() {
+function PnlApp() {
   const [datasets, setDatasets] = useState(loadDatasets);
 
   useEffect(() => {
@@ -1072,4 +1097,15 @@ export default function App() {
   const hasAny = datasets.dhan || datasets.zerodha;
   if (!hasAny) return <UploadScreen onData={updateDataset} />;
   return <Dashboard datasets={datasets} onUpdate={updateDataset} onRemove={removeBroker} onReset={reset} />;
+}
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/" element={<PnlApp />} />
+        <Route path="/swing" element={<SwingTracker />} />
+      </Routes>
+    </BrowserRouter>
+  );
 }
