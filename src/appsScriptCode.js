@@ -28,6 +28,7 @@ const SECRET = 'change-this-to-your-password';
 function doGet(e) {
   const params = (e && e.parameter) || {};
   if (params.secret !== SECRET) return jsonOut({ error: 'unauthorized' });
+  if (params.action === 'quote') return jsonOut(fetchQuote_(params.symbol));
   return jsonOut({ trades: readAll_() });
 }
 
@@ -82,6 +83,31 @@ function readAll_() {
     headers.forEach(function(h, j) { obj[h] = row[j]; });
     return obj;
   });
+}
+
+function fetchQuote_(symbol) {
+  if (!symbol) return { error: 'no symbol' };
+  const s = String(symbol).trim().toUpperCase();
+  const candidates = s.indexOf('.') >= 0 ? [s] : [s + '.NS', s + '.BO', s];
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(candidates[i]);
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      if (res.getResponseCode() !== 200) continue;
+      const json = JSON.parse(res.getContentText());
+      const r = json && json.chart && json.chart.result && json.chart.result[0];
+      const price = r && r.meta && r.meta.regularMarketPrice;
+      if (price) {
+        return {
+          symbol: candidates[i],
+          price: price,
+          currency: r.meta.currency || 'INR',
+          prevClose: r.meta.chartPreviousClose || null,
+        };
+      }
+    } catch (err) {}
+  }
+  return { error: 'not found' };
 }
 
 function jsonOut(obj) {

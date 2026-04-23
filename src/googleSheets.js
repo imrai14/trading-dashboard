@@ -34,6 +34,20 @@ export async function fetchTrades({ url, secret }) {
   return json.trades || [];
 }
 
+export async function fetchQuote({ url, secret }, symbol) {
+  if (!url || !secret) throw new Error("Missing Apps Script URL or password");
+  if (!symbol) throw new Error("Enter a symbol first");
+  const u = `${url}?secret=${encodeURIComponent(secret)}&action=quote&symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(u, { method: "GET", redirect: "follow" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  if (typeof json.price !== "number") {
+    throw new Error("Apps Script is out of date — redeploy with the latest code to enable CMP fetch.");
+  }
+  return json;
+}
+
 async function postAction({ url, secret }, action, payload) {
   if (!url || !secret) throw new Error("Missing Apps Script URL or password");
   const res = await fetch(url, {
