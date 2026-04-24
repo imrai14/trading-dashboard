@@ -22,16 +22,23 @@ export function clearConfig() {
   localStorage.removeItem(CONFIG_KEY);
 }
 
-export async function fetchTrades({ url, secret }) {
+// Normalize every server response into { trades, settings }.
+function unpack(json) {
+  if (json.error) throw new Error(json.error);
+  return {
+    trades: json.trades || [],
+    settings: json.settings || {},
+  };
+}
+
+export async function fetchAll({ url, secret }) {
   if (!url || !secret) throw new Error("Missing Apps Script URL or password");
   const res = await fetch(`${url}?secret=${encodeURIComponent(secret)}`, {
     method: "GET",
     redirect: "follow",
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.error) throw new Error(json.error);
-  return json.trades || [];
+  return unpack(await res.json());
 }
 
 async function postAction({ url, secret }, action, payload) {
@@ -43,9 +50,7 @@ async function postAction({ url, secret }, action, payload) {
     body: JSON.stringify({ secret, action, ...payload }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.error) throw new Error(json.error);
-  return json.trades || [];
+  return unpack(await res.json());
 }
 
 export function addTrade(config, trade) {
@@ -60,6 +65,10 @@ export function deleteTrade(config, rowIndex) {
   return postAction(config, "delete", { rowIndex });
 }
 
+export function saveSettings(config, settings) {
+  return postAction(config, "setSettings", { settings });
+}
+
 // Map a row from the sheet (keyed by header names) into our trade shape.
 export function normalizeTrade(raw) {
   const num = (v) => {
@@ -67,19 +76,43 @@ export function normalizeTrade(raw) {
     const n = parseFloat(v);
     return isNaN(n) ? 0 : n;
   };
+  // Dates may come back as ISO strings (from JSON) or as Date objects when
+  // Apps Script's Utilities serializes. Normalize to YYYY-MM-DD.
+  const dateStr = (v) => {
+    if (!v) return "";
+    const s = String(v);
+    // Already yyyy-mm-dd?
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    const d = new Date(s);
+    if (!isNaN(d)) return d.toISOString().slice(0, 10);
+    return s;
+  };
   return {
     _row: raw._row,
-    date: String(raw["Date"] ?? ""),
+    date: dateStr(raw["Date"]),
     symbol: String(raw["Symbol"] ?? ""),
     entryPrice: num(raw["Entry Price"]),
     stopLoss: num(raw["Stop Loss"]),
-    target: num(raw["Target"]),
+    target: num(raw["Target"]), // legacy, not shown in UI
     qty: num(raw["Qty"]),
-    totalCapital: num(raw["Total Capital"]),
     status: String(raw["Status"] ?? "Open"),
     exitPrice: num(raw["Exit Price"]),
-    exitDate: String(raw["Exit Date"] ?? ""),
+    exitDate: dateStr(raw["Exit Date"]),
     notes: String(raw["Notes"] ?? ""),
     ltp: num(raw["LTP"]),
+    marketCondition: String(raw["Market Condition"] ?? ""),
+    chartLink: String(raw["Chart Link"] ?? ""),
+    mistakes: String(raw["Mistakes"] ?? ""),
+  };
+}
+
+export function normalizeSettings(raw) {
+  const num = (v) => {
+    if (v === "" || v == null) return 0;
+    const n = parseFloat(v);
+    return isNaN(n) ? 0 : n;
+  };
+  return {
+    totalCapital: num(raw.totalCapital),
   };
 }

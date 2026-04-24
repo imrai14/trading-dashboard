@@ -1,15 +1,22 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { Link } from "react-router-dom";
-import { APPS_SCRIPT_CODE, SHEET_HEADERS } from "./appsScriptCode";
+import {
+  APPS_SCRIPT_CODE,
+  SHEET_HEADERS,
+  MISTAKE_OPTIONS,
+  MARKET_CONDITIONS,
+} from "./appsScriptCode";
 import {
   loadConfig,
   saveConfig,
   clearConfig,
-  fetchTrades,
+  fetchAll,
   addTrade as apiAddTrade,
   updateTrade as apiUpdateTrade,
   deleteTrade as apiDeleteTrade,
+  saveSettings as apiSaveSettings,
   normalizeTrade,
+  normalizeSettings,
 } from "./googleSheets";
 
 const C = {
@@ -39,7 +46,33 @@ const fmtINR = (n) =>
 
 const fmtPct = (n) => `${(n || 0).toFixed(2)}%`;
 
-function computeMetrics(trades) {
+// Days between two ISO date strings; second arg null means "today".
+function daysBetween(from, to) {
+  if (!from) return null;
+  const a = new Date(from);
+  const b = to ? new Date(to) : new Date();
+  if (isNaN(a) || isNaN(b)) return null;
+  return Math.max(0, Math.floor((b - a) / 86400000));
+}
+
+export function tradeAge(t) {
+  if (t.status?.toLowerCase() === "open") return daysBetween(t.date, null);
+  return daysBetween(t.date, t.exitDate);
+}
+
+// Total Capital now lives in the Settings sheet. Fall back to the most
+// recent per-trade value so users migrating from the old schema still see
+// sane metrics until they set a capital value.
+function resolveCapital(trades, settings) {
+  if (settings?.totalCapital) return settings.totalCapital;
+  for (let i = trades.length - 1; i >= 0; i--) {
+    const c = parseFloat(trades[i].totalCapital);
+    if (c) return c;
+  }
+  return 0;
+}
+
+function computeMetrics(trades, settings) {
   const open = trades.filter((t) => t.status?.toLowerCase() === "open");
   const closed = trades.filter((t) => t.status?.toLowerCase() === "closed");
 
@@ -51,12 +84,7 @@ function computeMetrics(trades) {
     (s, t) => s + t.entryPrice * t.qty,
     0,
   );
-  const latestCapital =
-    trades.length > 0
-      ? trades[trades.length - 1].totalCapital ||
-        trades.find((t) => t.totalCapital)?.totalCapital ||
-        0
-      : 0;
+  const latestCapital = resolveCapital(trades, settings);
   const capitalDeployedPct = latestCapital
     ? (capitalDeployed / latestCapital) * 100
     : 0;
@@ -81,20 +109,6 @@ function computeMetrics(trades) {
       ? rMultiples.reduce((s, v) => s + v, 0) / rMultiples.length
       : 0;
 
-  // Planned R:R from still-open trades (target:stoploss relative to entry).
-  const plannedRRs = open
-    .map((t) => {
-      const risk = t.entryPrice - t.stopLoss;
-      const reward = t.target - t.entryPrice;
-      if (risk <= 0) return null;
-      return reward / risk;
-    })
-    .filter((v) => v !== null && isFinite(v));
-  const avgPlannedRR =
-    plannedRRs.length > 0
-      ? plannedRRs.reduce((s, v) => s + v, 0) / plannedRRs.length
-      : 0;
-
   return {
     open,
     closed,
@@ -105,7 +119,6 @@ function computeMetrics(trades) {
     openRisk,
     avgRiskPct,
     avgR,
-    avgPlannedRR,
   };
 }
 
@@ -413,13 +426,14 @@ const emptyForm = {
   symbol: "",
   entryPrice: "",
   stopLoss: "",
-  target: "",
   qty: "",
-  totalCapital: "",
   status: "Open",
   exitPrice: "",
   exitDate: "",
   notes: "",
+  marketCondition: "",
+  chartLink: "",
+  mistakes: "", // stored as CSV of mistake labels
 };
 
 function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
@@ -437,15 +451,26 @@ function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
   );
 }
 
-function TradeForm({ initial, onSubmit, onCancel, lastCapital }) {
+function TradeForm({ initial, onSubmit, onCancel }) {
   const [form, setForm] = useState(() => ({
     ...emptyForm,
-    totalCapital: lastCapital || "",
     ...(initial || {}),
   }));
   const [saving, setSaving] = useState(false);
 
   const set = useCallback((k, v) => setForm((f) => ({ ...f, [k]: v })), []);
+
+  // Mistakes are stored as a CSV string in the sheet but edited as a set.
+  const selectedMistakes = (form.mistakes || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const toggleMistake = (m) => {
+    const next = selectedMistakes.includes(m)
+      ? selectedMistakes.filter((x) => x !== m)
+      : [...selectedMistakes, m];
+    set("mistakes", next.join(", "));
+  };
 
   const submit = async () => {
     if (!form.symbol || !form.entryPrice || !form.stopLoss || !form.qty) {
@@ -494,15 +519,65 @@ function TradeForm({ initial, onSubmit, onCancel, lastCapital }) {
         </div>
         <Field k="entryPrice" label="Entry Price" type="number" value={form.entryPrice} onChange={set} />
         <Field k="stopLoss" label="Stop Loss" type="number" value={form.stopLoss} onChange={set} />
-        <Field k="target" label="Target" type="number" value={form.target} onChange={set} />
         <Field k="qty" label="Qty" type="number" value={form.qty} onChange={set} />
-        <Field k="totalCapital" label="Total Capital (₹)" type="number" value={form.totalCapital} onChange={set} />
+        <div>
+          <label style={labelStyle}>Market Condition</label>
+          <select
+            style={fieldStyle}
+            value={form.marketCondition || ""}
+            onChange={(e) => set("marketCondition", e.target.value)}
+          >
+            <option value="">—</option>
+            {MARKET_CONDITIONS.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        <Field
+          k="chartLink"
+          label="Chart Link"
+          type="url"
+          placeholder="https://…"
+          value={form.chartLink}
+          onChange={set}
+        />
         {form.status === "Closed" && (
           <>
             <Field k="exitPrice" label="Exit Price" type="number" value={form.exitPrice} onChange={set} />
             <Field k="exitDate" label="Exit Date" type="date" value={form.exitDate} onChange={set} />
           </>
         )}
+      </div>
+      <div style={{ marginBottom: 14 }}>
+        <label style={labelStyle}>Mistakes</label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {MISTAKE_OPTIONS.map((m) => {
+            const on = selectedMistakes.includes(m);
+            return (
+              <button
+                type="button"
+                key={m}
+                onClick={() => toggleMistake(m)}
+                style={{
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: 11,
+                  letterSpacing: "1px",
+                  padding: "7px 12px",
+                  borderRadius: 999,
+                  border: `1px solid ${on ? C.red : C.border}`,
+                  background: on ? C.redDim : "transparent",
+                  color: on ? C.red : C.sub,
+                  cursor: "pointer",
+                }}
+              >
+                {on ? "✓ " : ""}
+                {m}
+              </button>
+            );
+          })}
+        </div>
       </div>
       <div style={{ marginBottom: 14 }}>
         <label style={labelStyle}>Notes</label>
@@ -611,8 +686,9 @@ function TradesTable({ title, trades, capital, onEdit, onDelete }) {
                 <th style={{ padding: "12px 14px", textAlign: "left" }}>Symbol</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>Entry</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>SL</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>Target</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>Qty</th>
+                <th style={{ padding: "12px 14px", textAlign: "right" }}>Age</th>
+                <th style={{ padding: "12px 14px", textAlign: "left" }}>Context</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>Risk</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>P&L</th>
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>R-mult</th>
@@ -684,19 +760,89 @@ function TradesTable({ title, trades, capital, onEdit, onDelete }) {
                         padding: "12px 14px",
                         textAlign: "right",
                         fontFamily: "'DM Mono', monospace",
-                        color: C.green,
                       }}
                     >
-                      {t.target || "—"}
+                      {t.qty}
                     </td>
                     <td
                       style={{
                         padding: "12px 14px",
                         textAlign: "right",
                         fontFamily: "'DM Mono', monospace",
+                        color: C.sub,
                       }}
                     >
-                      {t.qty}
+                      {(() => {
+                        const age = tradeAge(t);
+                        return age == null ? "—" : `${age}d`;
+                      })()}
+                    </td>
+                    <td style={{ padding: "12px 14px" }}>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+                        {t.marketCondition && (
+                          <span
+                            style={{
+                              fontFamily: "'DM Mono', monospace",
+                              fontSize: 10,
+                              letterSpacing: "0.5px",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: C.blueDim,
+                              color: C.blue,
+                              border: `1px solid ${C.blue}40`,
+                            }}
+                          >
+                            {t.marketCondition}
+                          </span>
+                        )}
+                        {(t.mistakes || "")
+                          .split(",")
+                          .map((s) => s.trim())
+                          .filter(Boolean)
+                          .map((mk) => (
+                            <span
+                              key={mk}
+                              style={{
+                                fontFamily: "'DM Mono', monospace",
+                                fontSize: 10,
+                                letterSpacing: "0.5px",
+                                padding: "3px 8px",
+                                borderRadius: 999,
+                                background: C.redDim,
+                                color: C.red,
+                                border: `1px solid ${C.red}40`,
+                              }}
+                            >
+                              {mk}
+                            </span>
+                          ))}
+                        {t.chartLink && (
+                          <a
+                            href={t.chartLink}
+                            target="_blank"
+                            rel="noreferrer noopener"
+                            title={t.chartLink}
+                            style={{
+                              fontFamily: "'DM Mono', monospace",
+                              fontSize: 10,
+                              letterSpacing: "0.5px",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: C.accentDim,
+                              color: C.accent,
+                              border: `1px solid ${C.accent}40`,
+                              textDecoration: "none",
+                            }}
+                          >
+                            📈 chart
+                          </a>
+                        )}
+                        {!t.marketCondition &&
+                          !t.mistakes &&
+                          !t.chartLink && (
+                            <span style={{ color: C.muted, fontSize: 12 }}>—</span>
+                          )}
+                      </div>
                     </td>
                     <td
                       style={{
@@ -784,52 +930,61 @@ function TradesTable({ title, trades, capital, onEdit, onDelete }) {
 export default function SwingTracker() {
   const [config, setConfig] = useState(loadConfig);
   const [trades, setTrades] = useState([]);
+  const [settings, setSettingsState] = useState({ totalCapital: 0 });
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [capitalDraft, setCapitalDraft] = useState("");
+  const [savingCapital, setSavingCapital] = useState(false);
 
   const hasConfig = !!(config.url && config.secret);
+
+  // Central spot to apply a server response ({trades, settings}) to our state.
+  const applyResponse = useCallback(({ trades: rawTrades, settings: rawSettings }) => {
+    setTrades(rawTrades.map(normalizeTrade));
+    const s = normalizeSettings(rawSettings || {});
+    setSettingsState(s);
+    setCapitalDraft(s.totalCapital ? String(s.totalCapital) : "");
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!hasConfig) return;
     setLoading(true);
     setErr(null);
     try {
-      const raw = await fetchTrades(config);
-      setTrades(raw.map(normalizeTrade));
+      const resp = await fetchAll(config);
+      applyResponse(resp);
     } catch (e) {
       setErr(e.message);
     } finally {
       setLoading(false);
     }
-  }, [config, hasConfig]);
+  }, [config, hasConfig, applyResponse]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  const m = useMemo(() => computeMetrics(trades), [trades]);
+  const m = useMemo(() => computeMetrics(trades, settings), [trades, settings]);
 
   const handleSave = async (form) => {
     const trade = {
       ...form,
       entryPrice: parseFloat(form.entryPrice) || 0,
       stopLoss: parseFloat(form.stopLoss) || 0,
-      target: parseFloat(form.target) || 0,
       qty: parseFloat(form.qty) || 0,
-      totalCapital: parseFloat(form.totalCapital) || 0,
       exitPrice: parseFloat(form.exitPrice) || 0,
       // LTP is auto-computed by GOOGLEFINANCE in the sheet — we don't send it.
     };
     if (editing) {
-      const next = await apiUpdateTrade(config, editing._row, trade);
-      setTrades(next.map(normalizeTrade));
+      const resp = await apiUpdateTrade(config, editing._row, trade);
+      applyResponse(resp);
       setEditing(null);
       setFormOpen(false);
     } else {
-      const next = await apiAddTrade(config, trade);
-      setTrades(next.map(normalizeTrade));
+      const resp = await apiAddTrade(config, trade);
+      applyResponse(resp);
       setFormOpen(false);
     }
   };
@@ -837,8 +992,8 @@ export default function SwingTracker() {
   const handleDelete = async (t) => {
     if (!window.confirm(`Delete trade: ${t.symbol}?`)) return;
     try {
-      const next = await apiDeleteTrade(config, t._row);
-      setTrades(next.map(normalizeTrade));
+      const resp = await apiDeleteTrade(config, t._row);
+      applyResponse(resp);
     } catch (e) {
       alert(`Delete failed: ${e.message}`);
     }
@@ -849,11 +1004,27 @@ export default function SwingTracker() {
     setFormOpen(true);
   };
 
+  const handleCapitalSave = async () => {
+    const value = parseFloat(capitalDraft) || 0;
+    if (value === (settings.totalCapital || 0)) return;
+    setSavingCapital(true);
+    try {
+      const resp = await apiSaveSettings(config, { totalCapital: value });
+      applyResponse(resp);
+    } catch (e) {
+      alert(`Save failed: ${e.message}`);
+    } finally {
+      setSavingCapital(false);
+    }
+  };
+
   const disconnect = () => {
     if (!window.confirm("Disconnect your sheet? Your data in Google Sheets stays untouched.")) return;
     clearConfig();
     setConfig({ url: "", secret: "" });
     setTrades([]);
+    setSettingsState({ totalCapital: 0 });
+    setCapitalDraft("");
   };
 
   return (
@@ -963,6 +1134,52 @@ export default function SwingTracker() {
             </Link>
             {hasConfig && (
               <>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 4px 4px 12px",
+                    borderRadius: 6,
+                    background: C.card,
+                    border: `1px solid ${C.border}`,
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: 10,
+                      letterSpacing: "1.5px",
+                      color: C.sub,
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Capital ₹
+                  </span>
+                  <input
+                    type="number"
+                    value={capitalDraft}
+                    placeholder="0"
+                    onChange={(e) => setCapitalDraft(e.target.value)}
+                    onBlur={handleCapitalSave}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
+                    disabled={savingCapital}
+                    style={{
+                      width: 100,
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: 12,
+                      padding: "6px 8px",
+                      borderRadius: 4,
+                      border: `1px solid ${C.border}`,
+                      background: C.surface,
+                      color: C.accent,
+                      outline: "none",
+                      textAlign: "right",
+                    }}
+                  />
+                </div>
                 <button
                   onClick={refresh}
                   disabled={loading}
@@ -1069,7 +1286,7 @@ export default function SwingTracker() {
               <StatCard
                 label="R-Multiple (Closed)"
                 value={m.avgR.toFixed(2)}
-                sub={`${m.closed.length} closed · planned R:R ${m.avgPlannedRR.toFixed(2)}`}
+                sub={`${m.closed.length} closed`}
                 color={m.avgR >= 1 ? C.green : m.avgR >= 0 ? C.accent : C.red}
               />
             </div>
@@ -1079,7 +1296,6 @@ export default function SwingTracker() {
                 <SectionTitle>{editing ? "Edit Trade" : "New Trade"}</SectionTitle>
                 <TradeForm
                   initial={editing}
-                  lastCapital={m.latestCapital}
                   onSubmit={handleSave}
                   onCancel={() => {
                     setEditing(null);
