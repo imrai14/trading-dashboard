@@ -25,10 +25,16 @@ export const APPS_SCRIPT_CODE = `// ─── TradeScope Swing Tracker · Google
 const SHEET_NAME = 'SwingTrades';
 const SECRET = 'change-this-to-your-password';
 
+// LTP (column L, index 12) is a live GOOGLEFINANCE formula per row.
+// Users never type LTP — the sheet computes it from the Symbol in column B.
+const LTP_COL = 12;
+function ltpFormulaFor_(rowIdx) {
+  return '=IFERROR(GOOGLEFINANCE("NSE:"&B' + rowIdx + ',"price"),"")';
+}
+
 function doGet(e) {
   const params = (e && e.parameter) || {};
   if (params.secret !== SECRET) return jsonOut({ error: 'unauthorized' });
-  if (params.action === 'quote') return jsonOut(fetchQuote_(params.symbol));
   return jsonOut({ trades: readAll_() });
 }
 
@@ -40,19 +46,24 @@ function doPost(e) {
 
   const sheet = getSheet_();
   const t = body.trade || {};
+  // 11 user-filled columns — LTP (col 12) is a formula, written separately.
   const row = [
     t.date || '', t.symbol || '', t.entryPrice || '', t.stopLoss || '',
     t.target || '', t.qty || '', t.totalCapital || '', t.status || 'Open',
-    t.exitPrice || '', t.exitDate || '', t.notes || '', t.ltp || '',
+    t.exitPrice || '', t.exitDate || '', t.notes || '',
   ];
 
   if (body.action === 'add') {
     sheet.appendRow(row);
+    const rowIdx = sheet.getLastRow();
+    sheet.getRange(rowIdx, LTP_COL).setFormula(ltpFormulaFor_(rowIdx));
     return jsonOut({ ok: true, trades: readAll_() });
   }
   if (body.action === 'update') {
     const rowIdx = Number(body.rowIndex) + 2; // +1 header, +1 for 1-indexed
     sheet.getRange(rowIdx, 1, 1, row.length).setValues([row]);
+    // (Re)apply the formula in case Symbol changed or formula was wiped.
+    sheet.getRange(rowIdx, LTP_COL).setFormula(ltpFormulaFor_(rowIdx));
     return jsonOut({ ok: true, trades: readAll_() });
   }
   if (body.action === 'delete') {
@@ -75,6 +86,7 @@ function getSheet_() {
 
 function readAll_() {
   const sheet = getSheet_();
+  ensureLTPFormulas_(sheet);
   const values = sheet.getDataRange().getValues();
   if (values.length < 2) return [];
   const headers = values[0];
@@ -85,29 +97,19 @@ function readAll_() {
   });
 }
 
-function fetchQuote_(symbol) {
-  if (!symbol) return { error: 'no symbol' };
-  const s = String(symbol).trim().toUpperCase();
-  const candidates = s.indexOf('.') >= 0 ? [s] : [s + '.NS', s + '.BO', s];
-  for (let i = 0; i < candidates.length; i++) {
-    try {
-      const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(candidates[i]);
-      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-      if (res.getResponseCode() !== 200) continue;
-      const json = JSON.parse(res.getContentText());
-      const r = json && json.chart && json.chart.result && json.chart.result[0];
-      const price = r && r.meta && r.meta.regularMarketPrice;
-      if (price) {
-        return {
-          symbol: candidates[i],
-          price: price,
-          currency: r.meta.currency || 'INR',
-          prevClose: r.meta.chartPreviousClose || null,
-        };
-      }
-    } catch (err) {}
+// Self-heal: for any row with a Symbol but no LTP formula (e.g. older rows
+// added before this feature), install the GOOGLEFINANCE formula.
+function ensureLTPFormulas_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const count = lastRow - 1;
+  const formulas = sheet.getRange(2, LTP_COL, count, 1).getFormulas();
+  const symbols = sheet.getRange(2, 2, count, 1).getValues();
+  for (let i = 0; i < count; i++) {
+    if (symbols[i][0] && !formulas[i][0]) {
+      sheet.getRange(i + 2, LTP_COL).setFormula(ltpFormulaFor_(i + 2));
+    }
   }
-  return { error: 'not found' };
 }
 
 function jsonOut(obj) {

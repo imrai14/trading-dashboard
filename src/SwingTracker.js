@@ -6,7 +6,6 @@ import {
   saveConfig,
   clearConfig,
   fetchTrades,
-  fetchQuote,
   addTrade as apiAddTrade,
   updateTrade as apiUpdateTrade,
   deleteTrade as apiDeleteTrade,
@@ -256,6 +255,11 @@ function SetupScreen({ onSave }) {
           Create a new Google Sheet called <strong style={{ color: C.text }}>SwingTrades</strong>.
           Paste these column headers into row 1 (the script will auto-create the sheet if you skip this):
         </div>
+        <div style={{ marginBottom: 14, fontSize: 12.5, color: C.muted }}>
+          ↳ The <strong style={{ color: C.accent }}>LTP</strong> column is auto-filled by{" "}
+          <code style={{ color: C.accent }}>GOOGLEFINANCE</code> — you never type a price. The
+          script writes the formula for you on every new trade.
+        </div>
         <div
           style={{
             fontFamily: "'DM Mono', monospace",
@@ -416,7 +420,6 @@ const emptyForm = {
   exitPrice: "",
   exitDate: "",
   notes: "",
-  ltp: "",
 };
 
 function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
@@ -434,14 +437,13 @@ function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
   );
 }
 
-function TradeForm({ initial, onSubmit, onCancel, lastCapital, onFetchQuote }) {
+function TradeForm({ initial, onSubmit, onCancel, lastCapital }) {
   const [form, setForm] = useState(() => ({
     ...emptyForm,
     totalCapital: lastCapital || "",
     ...(initial || {}),
   }));
   const [saving, setSaving] = useState(false);
-  const [fetching, setFetching] = useState(false);
 
   const set = useCallback((k, v) => setForm((f) => ({ ...f, [k]: v })), []);
 
@@ -457,22 +459,6 @@ function TradeForm({ initial, onSubmit, onCancel, lastCapital, onFetchQuote }) {
       alert(`Save failed: ${e.message}`);
     } finally {
       setSaving(false);
-    }
-  };
-
-  const fetchCMP = async () => {
-    if (!form.symbol) {
-      alert("Enter a symbol first.");
-      return;
-    }
-    setFetching(true);
-    try {
-      const q = await onFetchQuote(form.symbol);
-      setForm((f) => ({ ...f, ltp: String(q.price) }));
-    } catch (e) {
-      alert(`Could not fetch CMP: ${e.message}`);
-    } finally {
-      setFetching(false);
     }
   };
 
@@ -511,36 +497,6 @@ function TradeForm({ initial, onSubmit, onCancel, lastCapital, onFetchQuote }) {
         <Field k="target" label="Target" type="number" value={form.target} onChange={set} />
         <Field k="qty" label="Qty" type="number" value={form.qty} onChange={set} />
         <Field k="totalCapital" label="Total Capital (₹)" type="number" value={form.totalCapital} onChange={set} />
-        <div>
-          <label style={labelStyle}>LTP (for Open)</label>
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              style={{ ...fieldStyle, flex: 1 }}
-              type="number"
-              value={form.ltp ?? ""}
-              onChange={(e) => set("ltp", e.target.value)}
-            />
-            <button
-              type="button"
-              onClick={fetchCMP}
-              disabled={fetching}
-              title="Fetch current market price from Yahoo Finance"
-              style={{
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 11,
-                padding: "0 12px",
-                borderRadius: 6,
-                border: `1px solid ${C.accent}60`,
-                background: C.accentDim,
-                color: C.accent,
-                cursor: fetching ? "wait" : "pointer",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {fetching ? "…" : "↻ CMP"}
-            </button>
-          </div>
-        </div>
         {form.status === "Closed" && (
           <>
             <Field k="exitPrice" label="Exit Price" type="number" value={form.exitPrice} onChange={set} />
@@ -599,7 +555,7 @@ function TradeForm({ initial, onSubmit, onCancel, lastCapital, onFetchQuote }) {
   );
 }
 
-function TradesTable({ title, trades, capital, onEdit, onDelete, onRefreshPrices, refreshing }) {
+function TradesTable({ title, trades, capital, onEdit, onDelete }) {
   if (trades.length === 0) {
     return (
       <div>
@@ -623,42 +579,7 @@ function TradesTable({ title, trades, capital, onEdit, onDelete, onRefreshPrices
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 18, marginTop: 36 }}>
-        <div
-          style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: 10,
-            letterSpacing: "3px",
-            color: C.sub,
-            textTransform: "uppercase",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {title}
-        </div>
-        <div style={{ flex: 1, height: 1, background: C.border }} />
-        {onRefreshPrices && (
-          <button
-            onClick={onRefreshPrices}
-            disabled={refreshing}
-            style={{
-              fontFamily: "'DM Mono', monospace",
-              fontSize: 10,
-              letterSpacing: "1.5px",
-              padding: "6px 12px",
-              borderRadius: 5,
-              border: `1px solid ${C.accent}60`,
-              background: C.accentDim,
-              color: C.accent,
-              cursor: refreshing ? "wait" : "pointer",
-              textTransform: "uppercase",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {refreshing ? "Fetching…" : "↻ Refresh Prices"}
-          </button>
-        )}
-      </div>
+      <SectionTitle>{title}</SectionTitle>
       <div
         style={{
           background: C.card,
@@ -867,7 +788,6 @@ export default function SwingTracker() {
   const [err, setErr] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
-  const [refreshingPrices, setRefreshingPrices] = useState(false);
 
   const hasConfig = !!(config.url && config.secret);
 
@@ -900,7 +820,7 @@ export default function SwingTracker() {
       qty: parseFloat(form.qty) || 0,
       totalCapital: parseFloat(form.totalCapital) || 0,
       exitPrice: parseFloat(form.exitPrice) || 0,
-      ltp: parseFloat(form.ltp) || 0,
+      // LTP is auto-computed by GOOGLEFINANCE in the sheet — we don't send it.
     };
     if (editing) {
       const next = await apiUpdateTrade(config, editing._row, trade);
@@ -927,35 +847,6 @@ export default function SwingTracker() {
   const handleEdit = (t) => {
     setEditing(t);
     setFormOpen(true);
-  };
-
-  const handleFetchQuote = useCallback(
-    (symbol) => fetchQuote(config, symbol),
-    [config],
-  );
-
-  const handleRefreshPrices = async () => {
-    const openTrades = trades.filter((t) => t.status?.toLowerCase() === "open");
-    if (openTrades.length === 0) return;
-    setRefreshingPrices(true);
-    setErr(null);
-    let latest = trades;
-    try {
-      for (const t of openTrades) {
-        try {
-          const q = await fetchQuote(config, t.symbol);
-          // Apps Script returns the full updated list after each write; keep the newest one.
-          latest = await apiUpdateTrade(config, t._row, { ...t, ltp: q.price });
-        } catch {
-          // Skip symbols we can't resolve; keep going so the rest update.
-        }
-      }
-      setTrades(latest.map(normalizeTrade));
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setRefreshingPrices(false);
-    }
   };
 
   const disconnect = () => {
@@ -1160,7 +1051,7 @@ export default function SwingTracker() {
               <StatCard
                 label="Open P&L"
                 value={fmtINR(m.openPnl)}
-                sub={`${m.open.length} open · using LTP`}
+                sub={`${m.open.length} open · live via GOOGLEFINANCE`}
                 color={m.openPnl >= 0 ? C.green : C.red}
               />
               <StatCard
@@ -1190,7 +1081,6 @@ export default function SwingTracker() {
                   initial={editing}
                   lastCapital={m.latestCapital}
                   onSubmit={handleSave}
-                  onFetchQuote={handleFetchQuote}
                   onCancel={() => {
                     setEditing(null);
                     setFormOpen(false);
@@ -1205,8 +1095,6 @@ export default function SwingTracker() {
               capital={m.latestCapital}
               onEdit={handleEdit}
               onDelete={handleDelete}
-              onRefreshPrices={handleRefreshPrices}
-              refreshing={refreshingPrices}
             />
             <TradesTable
               title="Closed Trades"
