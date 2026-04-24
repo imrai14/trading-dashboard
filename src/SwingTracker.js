@@ -451,7 +451,7 @@ function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
   );
 }
 
-function TradeForm({ initial, onSubmit, onCancel }) {
+function TradeForm({ initial, onSubmit, onCancel, settings }) {
   const [form, setForm] = useState(() => ({
     ...emptyForm,
     ...(initial || {}),
@@ -459,6 +459,17 @@ function TradeForm({ initial, onSubmit, onCancel }) {
   const [saving, setSaving] = useState(false);
 
   const set = useCallback((k, v) => setForm((f) => ({ ...f, [k]: v })), []);
+
+  // Auto-qty: (capital × risk%) / (entry − SL). Zero if any input is missing.
+  const entry = parseFloat(form.entryPrice) || 0;
+  const sl = parseFloat(form.stopLoss) || 0;
+  const capital = settings?.totalCapital || 0;
+  const riskPct = settings?.riskPerTradePct || 0;
+  const perShareRisk = entry - sl;
+  const suggestedQty =
+    capital > 0 && riskPct > 0 && perShareRisk > 0
+      ? Math.max(1, Math.floor((capital * (riskPct / 100)) / perShareRisk))
+      : 0;
 
   // Mistakes are stored as a CSV string in the sheet but edited as a set.
   const selectedMistakes = (form.mistakes || "")
@@ -519,7 +530,36 @@ function TradeForm({ initial, onSubmit, onCancel }) {
         </div>
         <Field k="entryPrice" label="Entry Price" type="number" value={form.entryPrice} onChange={set} />
         <Field k="stopLoss" label="Stop Loss" type="number" value={form.stopLoss} onChange={set} />
-        <Field k="qty" label="Qty" type="number" value={form.qty} onChange={set} />
+        <div>
+          <label style={labelStyle}>Qty</label>
+          <input
+            style={fieldStyle}
+            type="number"
+            value={form.qty ?? ""}
+            onChange={(e) => set("qty", e.target.value)}
+          />
+          {suggestedQty > 0 && Number(form.qty) !== suggestedQty && (
+            <button
+              type="button"
+              onClick={() => set("qty", String(suggestedQty))}
+              style={{
+                marginTop: 6,
+                fontFamily: "'DM Mono', monospace",
+                fontSize: 10,
+                letterSpacing: "0.5px",
+                padding: "4px 10px",
+                borderRadius: 4,
+                border: `1px solid ${C.accent}40`,
+                background: C.accentDim,
+                color: C.accent,
+                cursor: "pointer",
+              }}
+              title={`${riskPct}% of ${fmtINR(capital)} ÷ (${entry} − ${sl})`}
+            >
+              use {suggestedQty} ({riskPct}% risk)
+            </button>
+          )}
+        </div>
         <div>
           <label style={labelStyle}>Market Condition</label>
           <select
@@ -630,7 +670,7 @@ function TradeForm({ initial, onSubmit, onCancel }) {
   );
 }
 
-function TradesTable({ title, trades, capital, onEdit, onDelete }) {
+function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose }) {
   if (trades.length === 0) {
     return (
       <div>
@@ -884,6 +924,25 @@ function TradesTable({ title, trades, capital, onEdit, onDelete }) {
                         textAlign: "right",
                       }}
                     >
+                      {onQuickClose && t.status?.toLowerCase() === "open" && (
+                        <button
+                          onClick={() => onQuickClose(t)}
+                          title={t.ltp ? `Close @ LTP ${t.ltp}` : "Close (enter exit price)"}
+                          style={{
+                            fontFamily: "'DM Mono', monospace",
+                            fontSize: 10,
+                            padding: "5px 9px",
+                            borderRadius: 4,
+                            border: `1px solid ${C.green}40`,
+                            background: C.greenDim,
+                            color: C.green,
+                            cursor: "pointer",
+                            marginRight: 6,
+                          }}
+                        >
+                          close
+                        </button>
+                      )}
                       <button
                         onClick={() => onEdit(t)}
                         style={{
@@ -927,16 +986,168 @@ function TradesTable({ title, trades, capital, onEdit, onDelete }) {
   );
 }
 
+// Compute count / win-rate / avg-R over an array of closed trades.
+function aggregateClosed(trades) {
+  const n = trades.length;
+  if (n === 0) return { n: 0, winRate: 0, avgR: 0 };
+  let wins = 0;
+  let rSum = 0;
+  let rCount = 0;
+  for (const t of trades) {
+    const risk = (t.entryPrice - t.stopLoss) * t.qty;
+    const reward = (t.exitPrice - t.entryPrice) * t.qty;
+    if (reward > 0) wins++;
+    if (risk > 0 && isFinite(reward / risk)) {
+      rSum += reward / risk;
+      rCount++;
+    }
+  }
+  return {
+    n,
+    winRate: (wins / n) * 100,
+    avgR: rCount ? rSum / rCount : 0,
+  };
+}
+
+function BreakdownTable({ title, rows }) {
+  if (rows.length === 0) return null;
+  return (
+    <div style={{ flex: 1, minWidth: 280 }}>
+      <div
+        style={{
+          fontFamily: "'DM Mono', monospace",
+          fontSize: 10,
+          letterSpacing: "2px",
+          color: C.sub,
+          textTransform: "uppercase",
+          marginBottom: 10,
+        }}
+      >
+        {title}
+      </div>
+      <div
+        style={{
+          background: C.card,
+          border: `1px solid ${C.border}`,
+          borderRadius: 10,
+          overflow: "hidden",
+        }}
+      >
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: 12.5,
+          }}
+        >
+          <thead>
+            <tr
+              style={{
+                background: C.surface,
+                fontFamily: "'DM Mono', monospace",
+                fontSize: 10,
+                letterSpacing: "1.5px",
+                color: C.sub,
+                textTransform: "uppercase",
+              }}
+            >
+              <th style={{ padding: "10px 14px", textAlign: "left" }}>Label</th>
+              <th style={{ padding: "10px 14px", textAlign: "right" }}>N</th>
+              <th style={{ padding: "10px 14px", textAlign: "right" }}>Win %</th>
+              <th style={{ padding: "10px 14px", textAlign: "right" }}>Avg R</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.label} style={{ borderTop: `1px solid ${C.border}` }}>
+                <td style={{ padding: "10px 14px", color: C.text }}>{r.label}</td>
+                <td
+                  style={{
+                    padding: "10px 14px",
+                    textAlign: "right",
+                    fontFamily: "'DM Mono', monospace",
+                    color: C.sub,
+                  }}
+                >
+                  {r.n}
+                </td>
+                <td
+                  style={{
+                    padding: "10px 14px",
+                    textAlign: "right",
+                    fontFamily: "'DM Mono', monospace",
+                    color: r.winRate >= 50 ? C.green : C.red,
+                  }}
+                >
+                  {r.winRate.toFixed(0)}%
+                </td>
+                <td
+                  style={{
+                    padding: "10px 14px",
+                    textAlign: "right",
+                    fontFamily: "'DM Mono', monospace",
+                    color: r.avgR >= 1 ? C.green : r.avgR >= 0 ? C.accent : C.red,
+                  }}
+                >
+                  {r.avgR.toFixed(2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PerformanceBreakdown({ closed }) {
+  if (closed.length === 0) return null;
+
+  const byMarket = MARKET_CONDITIONS.map((mc) => {
+    const subset = closed.filter((t) => t.marketCondition === mc);
+    return { label: mc, ...aggregateClosed(subset) };
+  }).filter((r) => r.n > 0);
+
+  const byMistake = MISTAKE_OPTIONS.map((mk) => {
+    const subset = closed.filter((t) =>
+      (t.mistakes || "")
+        .split(",")
+        .map((s) => s.trim())
+        .includes(mk),
+    );
+    return { label: mk, ...aggregateClosed(subset) };
+  }).filter((r) => r.n > 0);
+
+  // "Clean" trades = closed with no mistake tag.
+  const clean = closed.filter((t) => !(t.mistakes || "").trim());
+  if (clean.length > 0) {
+    byMistake.unshift({ label: "— no mistakes —", ...aggregateClosed(clean) });
+  }
+
+  if (byMarket.length === 0 && byMistake.length === 0) return null;
+
+  return (
+    <>
+      <SectionTitle>Performance Breakdown</SectionTitle>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 16 }}>
+        <BreakdownTable title="By Market Condition" rows={byMarket} />
+        <BreakdownTable title="By Mistake" rows={byMistake} />
+      </div>
+    </>
+  );
+}
+
 export default function SwingTracker() {
   const [config, setConfig] = useState(loadConfig);
   const [trades, setTrades] = useState([]);
-  const [settings, setSettingsState] = useState({ totalCapital: 0 });
+  const [settings, setSettingsState] = useState({ totalCapital: 0, riskPerTradePct: 0 });
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(null);
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [capitalDraft, setCapitalDraft] = useState("");
-  const [savingCapital, setSavingCapital] = useState(false);
+  const [riskPctDraft, setRiskPctDraft] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
 
   const hasConfig = !!(config.url && config.secret);
 
@@ -946,6 +1157,7 @@ export default function SwingTracker() {
     const s = normalizeSettings(rawSettings || {});
     setSettingsState(s);
     setCapitalDraft(s.totalCapital ? String(s.totalCapital) : "");
+    setRiskPctDraft(s.riskPerTradePct ? String(s.riskPerTradePct) : "");
   }, []);
 
   const refresh = useCallback(async () => {
@@ -1007,15 +1219,40 @@ export default function SwingTracker() {
   const handleCapitalSave = async () => {
     const value = parseFloat(capitalDraft) || 0;
     if (value === (settings.totalCapital || 0)) return;
-    setSavingCapital(true);
+    setSavingSettings(true);
     try {
       const resp = await apiSaveSettings(config, { totalCapital: value });
       applyResponse(resp);
     } catch (e) {
       alert(`Save failed: ${e.message}`);
     } finally {
-      setSavingCapital(false);
+      setSavingSettings(false);
     }
+  };
+
+  const handleRiskPctSave = async () => {
+    const value = parseFloat(riskPctDraft) || 0;
+    if (value === (settings.riskPerTradePct || 0)) return;
+    setSavingSettings(true);
+    try {
+      const resp = await apiSaveSettings(config, { riskPerTradePct: value });
+      applyResponse(resp);
+    } catch (e) {
+      alert(`Save failed: ${e.message}`);
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  // Pre-populate the form with today's date + LTP so the user just hits Save.
+  const handleQuickClose = (t) => {
+    setEditing({
+      ...t,
+      status: "Closed",
+      exitPrice: t.ltp || t.exitPrice || "",
+      exitDate: new Date().toISOString().slice(0, 10),
+    });
+    setFormOpen(true);
   };
 
   const disconnect = () => {
@@ -1023,8 +1260,9 @@ export default function SwingTracker() {
     clearConfig();
     setConfig({ url: "", secret: "" });
     setTrades([]);
-    setSettingsState({ totalCapital: 0 });
+    setSettingsState({ totalCapital: 0, riskPerTradePct: 0 });
     setCapitalDraft("");
+    setRiskPctDraft("");
   };
 
   return (
@@ -1165,9 +1403,57 @@ export default function SwingTracker() {
                     onKeyDown={(e) => {
                       if (e.key === "Enter") e.currentTarget.blur();
                     }}
-                    disabled={savingCapital}
+                    disabled={savingSettings}
                     style={{
                       width: 100,
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: 12,
+                      padding: "6px 8px",
+                      borderRadius: 4,
+                      border: `1px solid ${C.border}`,
+                      background: C.surface,
+                      color: C.accent,
+                      outline: "none",
+                      textAlign: "right",
+                    }}
+                  />
+                </div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "4px 4px 4px 12px",
+                    borderRadius: 6,
+                    background: C.card,
+                    border: `1px solid ${C.border}`,
+                  }}
+                  title="Risk per trade as a % of total capital. Used to suggest qty when adding a trade."
+                >
+                  <span
+                    style={{
+                      fontFamily: "'DM Mono', monospace",
+                      fontSize: 10,
+                      letterSpacing: "1.5px",
+                      color: C.sub,
+                      textTransform: "uppercase",
+                    }}
+                  >
+                    Risk %
+                  </span>
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={riskPctDraft}
+                    placeholder="1"
+                    onChange={(e) => setRiskPctDraft(e.target.value)}
+                    onBlur={handleRiskPctSave}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur();
+                    }}
+                    disabled={savingSettings}
+                    style={{
+                      width: 60,
                       fontFamily: "'DM Mono', monospace",
                       fontSize: 12,
                       padding: "6px 8px",
@@ -1296,6 +1582,7 @@ export default function SwingTracker() {
                 <SectionTitle>{editing ? "Edit Trade" : "New Trade"}</SectionTitle>
                 <TradeForm
                   initial={editing}
+                  settings={settings}
                   onSubmit={handleSave}
                   onCancel={() => {
                     setEditing(null);
@@ -1311,7 +1598,9 @@ export default function SwingTracker() {
               capital={m.latestCapital}
               onEdit={handleEdit}
               onDelete={handleDelete}
+              onQuickClose={handleQuickClose}
             />
+            <PerformanceBreakdown closed={m.closed} />
             <TradesTable
               title="Closed Trades"
               trades={m.closed}

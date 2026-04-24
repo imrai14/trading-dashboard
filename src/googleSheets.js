@@ -114,5 +114,6 @@ export function normalizeSettings(raw) {
   };
   return {
     totalCapital: num(raw.totalCapital),
+    riskPerTradePct: num(raw.riskPerTradePct),
   };
 }
