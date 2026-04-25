@@ -139,9 +139,18 @@ function computeMetrics(trades, settings) {
       ? rMultiples.reduce((s, v) => s + v, 0) / rMultiples.length
       : 0;
 
+  // Closed trades sorted newest-first — by exit date, falling back to entry
+  // date. Page 1 of the closed-trades table then shows the most recent.
+  const closedSorted = [...closed].sort((a, b) => {
+    const aKey = a.exitDate || a.date || "";
+    const bKey = b.exitDate || b.date || "";
+    return bKey.localeCompare(aKey);
+  });
+
   return {
     open,
     closed,
+    closedSorted,
     openPnl,
     capitalDeployed,
     capitalDeployedPct,
@@ -1039,7 +1048,26 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
   );
 }
 
-function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose }) {
+function TradesTable({
+  title,
+  trades,
+  capital,
+  onEdit,
+  onDelete,
+  onQuickClose,
+  paginate = false,
+  pageSize = 10,
+}) {
+  const [page, setPage] = useState(0);
+
+  // Reset to page 0 if the trade list shrinks (e.g. user deleted enough to
+  // empty the current page) or if we toggle pagination.
+  const totalPages = paginate ? Math.max(1, Math.ceil(trades.length / pageSize)) : 1;
+  const safePage = Math.min(page, totalPages - 1);
+  const visible = paginate
+    ? trades.slice(safePage * pageSize, safePage * pageSize + pageSize)
+    : trades;
+
   if (trades.length === 0) {
     return (
       <div>
@@ -1105,7 +1133,7 @@ function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose })
               </tr>
             </thead>
             <tbody>
-              {trades.map((t) => {
+              {visible.map((t) => {
                 const risk = Math.max(0, (t.entryPrice - t.stopLoss) * t.qty);
                 const riskPct = capital ? (risk / capital) * 100 : 0;
                 const isOpen = t.status?.toLowerCase() === "open";
@@ -1354,10 +1382,97 @@ function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose })
             </tbody>
           </table>
         </div>
+        {paginate && totalPages > 1 && (
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "10px 14px",
+              borderTop: `1px solid ${C.border}`,
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 11,
+              color: C.sub,
+              flexWrap: "wrap",
+              gap: 8,
+            }}
+          >
+            <span>
+              Showing{" "}
+              <span style={{ color: C.text }}>
+                {safePage * pageSize + 1}–
+                {Math.min(trades.length, safePage * pageSize + pageSize)}
+              </span>{" "}
+              of <span style={{ color: C.text }}>{trades.length}</span>
+            </span>
+            <div style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+              <button
+                type="button"
+                onClick={() => setPage(0)}
+                disabled={safePage === 0}
+                title="First page"
+                aria-label="First page"
+                style={pagerBtn(safePage === 0)}
+              >
+                «
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(0, p - 1))}
+                disabled={safePage === 0}
+                title="Previous page"
+                aria-label="Previous page"
+                style={pagerBtn(safePage === 0)}
+              >
+                ‹ Prev
+              </button>
+              <span style={{ padding: "0 8px" }}>
+                Page <span style={{ color: C.text }}>{safePage + 1}</span> /{" "}
+                {totalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  setPage((p) => Math.min(totalPages - 1, p + 1))
+                }
+                disabled={safePage >= totalPages - 1}
+                title="Next page"
+                aria-label="Next page"
+                style={pagerBtn(safePage >= totalPages - 1)}
+              >
+                Next ›
+              </button>
+              <button
+                type="button"
+                onClick={() => setPage(totalPages - 1)}
+                disabled={safePage >= totalPages - 1}
+                title="Last page"
+                aria-label="Last page"
+                style={pagerBtn(safePage >= totalPages - 1)}
+              >
+                »
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
+
+// Pager button style — disabled state goes muted. Helper hoisted so the
+// table component re-uses the same shape across all four pager buttons.
+const pagerBtn = (disabled) => ({
+  fontFamily: "'DM Mono', monospace",
+  fontSize: 11,
+  padding: "5px 10px",
+  borderRadius: 4,
+  border: `1px solid ${C.border}`,
+  background: disabled ? "transparent" : C.surface,
+  color: disabled ? C.muted : C.sub,
+  cursor: disabled ? "not-allowed" : "pointer",
+  opacity: disabled ? 0.5 : 1,
+});
 
 // Compute count / win-rate / avg-R over an array of closed trades.
 function aggregateClosed(trades) {
@@ -2051,10 +2166,12 @@ export default function SwingTracker() {
             <PerformanceBreakdown closed={m.closed} />
             <TradesTable
               title="Closed Trades"
-              trades={m.closed}
+              trades={m.closedSorted}
               capital={m.latestCapital}
               onEdit={handleEdit}
               onDelete={handleDelete}
+              paginate
+              pageSize={10}
             />
           </>
         )}
