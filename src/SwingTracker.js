@@ -546,16 +546,18 @@ const emptyForm = {
   exits: [],
 };
 
-function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
+function Field({ k, label, type = "text", placeholder = "", value, onChange, uppercase = false }) {
   return (
     <div>
       <label style={labelStyle}>{label}</label>
       <input
-        style={fieldStyle}
+        style={uppercase ? { ...fieldStyle, textTransform: "uppercase" } : fieldStyle}
         type={type}
         placeholder={placeholder}
         value={value ?? ""}
-        onChange={(e) => onChange(k, e.target.value)}
+        onChange={(e) =>
+          onChange(k, uppercase ? e.target.value.toUpperCase() : e.target.value)
+        }
       />
     </div>
   );
@@ -653,29 +655,6 @@ function LegEditor({
               value={leg.qty}
               onChange={(e) => onChange(kind, idx, "qty", e.target.value)}
             />
-            {idx === 0 &&
-              suggestedQty > 0 &&
-              Number(leg.qty) !== suggestedQty &&
-              onApplySuggestedQty && (
-                <button
-                  type="button"
-                  onClick={() => onApplySuggestedQty(idx)}
-                  style={{
-                    marginTop: 6,
-                    fontFamily: "'DM Mono', monospace",
-                    fontSize: 10,
-                    letterSpacing: "0.5px",
-                    padding: "4px 10px",
-                    borderRadius: 4,
-                    border: `1px solid ${C.accent}40`,
-                    background: C.accentDim,
-                    color: C.accent,
-                    cursor: "pointer",
-                  }}
-                >
-                  use {suggestedQty} ({riskPct}% risk)
-                </button>
-              )}
           </div>
           <div className="leg-date">
             {idx === 0 && <label style={labelStyle}>Date</label>}
@@ -706,6 +685,34 @@ function LegEditor({
           </button>
         </div>
       ))}
+      {/* Suggestion chip — rendered OUTSIDE the leg-row grid so it never
+          shifts the input alignment when it appears or disappears. */}
+      {suggestedQty > 0 &&
+        Number(legs[0]?.qty) !== suggestedQty &&
+        onApplySuggestedQty && (
+          <button
+            type="button"
+            onClick={() => onApplySuggestedQty(0)}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              marginBottom: 10,
+              marginRight: 10,
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 10,
+              letterSpacing: "0.5px",
+              padding: "4px 10px",
+              borderRadius: 4,
+              border: `1px solid ${C.accent}40`,
+              background: C.accentDim,
+              color: C.accent,
+              cursor: "pointer",
+            }}
+          >
+            use {suggestedQty} ({riskPct}% risk)
+          </button>
+        )}
       <button
         type="button"
         disabled={!canAdd}
@@ -779,7 +786,13 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
   const sl = parseFloat(form.stopLoss) || 0;
   const capital = settings?.totalCapital || 0;
   const riskPct = settings?.riskPerTradePct || 0;
-  const perShareRisk = entrySummary.avg - sl;
+  // Reference price for the qty suggestion: weighted-avg if any qty entered,
+  // otherwise just the first leg's price. This way the chip shows up the
+  // moment the user types a price — they don't have to enter a qty first
+  // (the whole point of the suggestion is to *propose* the qty).
+  const firstLegPrice = parseFloat(form.entries[0]?.price) || 0;
+  const refPrice = entrySummary.avg > 0 ? entrySummary.avg : firstLegPrice;
+  const perShareRisk = refPrice - sl;
   const suggestedQty =
     capital > 0 && riskPct > 0 && perShareRisk > 0
       ? Math.max(1, Math.floor((capital * (riskPct / 100)) / perShareRisk))
@@ -847,7 +860,7 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
       }}
     >
       <div className="form-grid">
-        <Field k="symbol" label="Symbol" placeholder="e.g. RELIANCE" value={form.symbol} onChange={set} />
+        <Field k="symbol" label="Symbol" placeholder="e.g. RELIANCE" value={form.symbol} onChange={set} uppercase />
         <Field k="stopLoss" label="Stop Loss" type="number" value={form.stopLoss} onChange={set} />
         <div>
           <label style={labelStyle}>Status</label>
@@ -1158,6 +1171,7 @@ function TradesTable({
                         padding: "12px 14px",
                         fontWeight: 600,
                         color: C.text,
+                        maxWidth: 220,
                       }}
                     >
                       {t.symbol}
@@ -1167,7 +1181,17 @@ function TradesTable({
                           fontSize: 10,
                           color: C.muted,
                           marginTop: 2,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          maxWidth: "100%",
                         }}
+                        // Native browser tooltip — full date + notes on hover.
+                        title={
+                          t.notes
+                            ? `${String(t.date).slice(0, 10)} · ${t.notes}`
+                            : undefined
+                        }
                       >
                         {String(t.date).slice(0, 10)}
                         {t.notes && ` · ${t.notes}`}
