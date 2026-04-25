@@ -139,6 +139,25 @@ function computeMetrics(trades, settings) {
       ? rMultiples.reduce((s, v) => s + v, 0) / rMultiples.length
       : 0;
 
+  // Realized P&L: total profit/loss booked across all closed trades.
+  // Sum of (exit - entry) × qty per trade. Wins/losses tracked separately so
+  // we can show win-rate and a gross-profit / gross-loss split if needed.
+  let realizedPnl = 0;
+  let wins = 0;
+  let grossProfit = 0;
+  let grossLoss = 0;
+  for (const t of closed) {
+    const pnl = (t.exitPrice - t.entryPrice) * t.qty;
+    realizedPnl += pnl;
+    if (pnl > 0) {
+      wins++;
+      grossProfit += pnl;
+    } else if (pnl < 0) {
+      grossLoss += pnl;
+    }
+  }
+  const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
+
   // Closed trades sorted newest-first — by exit date, falling back to entry
   // date. Page 1 of the closed-trades table then shows the most recent.
   const closedSorted = [...closed].sort((a, b) => {
@@ -158,6 +177,11 @@ function computeMetrics(trades, settings) {
     openRisk,
     avgRiskPct,
     avgR,
+    realizedPnl,
+    winRate,
+    wins,
+    grossProfit,
+    grossLoss,
   };
 }
 
@@ -1854,7 +1878,8 @@ export default function SwingTracker() {
         input, select, textarea { font: inherit; }
         input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
 
-        .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+        .stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+        @media (max-width: 1100px) { .stat-grid { grid-template-columns: repeat(3, 1fr); } }
         @media (max-width: 800px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 500px) { .stat-grid { grid-template-columns: 1fr; } }
 
@@ -2161,6 +2186,24 @@ export default function SwingTracker() {
                 value={m.avgR.toFixed(2)}
                 sub={`${m.closed.length} closed`}
                 color={m.avgR >= 1 ? C.green : m.avgR >= 0 ? C.accent : C.red}
+              />
+              <StatCard
+                label="Realized P&L"
+                value={
+                  (m.realizedPnl >= 0 ? "+" : "") + fmtINR(m.realizedPnl)
+                }
+                sub={
+                  m.closed.length > 0
+                    ? `${m.wins}/${m.closed.length} wins · ${m.winRate.toFixed(0)}% win rate`
+                    : "no closed trades"
+                }
+                color={
+                  m.realizedPnl > 0
+                    ? C.green
+                    : m.realizedPnl < 0
+                      ? C.red
+                      : C.text
+                }
               />
             </div>
 
