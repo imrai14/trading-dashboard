@@ -10,7 +10,8 @@
       "mcp__Claude_Preview__preview_start",
       "Read(//tmp/**)",
       "Bash(curl -s http://localhost:3456/static/js/bundle.js)",
-      "Bash(curl -s -o /tmp/b.js -w \"%{http_code} %{size_download}\\\\n\" http://localhost:3456/static/js/bundle.js)"
+      "Bash(curl -s -o /tmp/b.js -w \"%{http_code} %{size_download}\\\\n\" http://localhost:3456/static/js/bundle.js)",
+      "Bash(npm test *)"
     ]
   }
 }

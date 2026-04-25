@@ -18,6 +18,16 @@ import {
   normalizeTrade,
   normalizeSettings,
 } from "./googleSheets";
+import {
+  cleanLegs,
+  summarizeLegs,
+  tradeAge,
+  computeMetrics,
+  aggregateClosed,
+} from "./swingMath";
+
+// Re-export for any external consumers (test files, future imports).
+export { cleanLegs, summarizeLegs, tradeAge, computeMetrics, aggregateClosed };
 
 const C = {
   bg: "#07090f",
@@ -47,143 +57,6 @@ const fmtINR = (n) =>
 const fmtPct = (n) => `${(n || 0).toFixed(2)}%`;
 
 const MAX_LEGS = 3;
-
-// Normalize a leg object coming from the form (strings → numbers).
-function cleanLegs(legs) {
-  return (legs || [])
-    .map((l) => ({
-      price: parseFloat(l.price) || 0,
-      qty: parseFloat(l.qty) || 0,
-      date: l.date || "",
-    }))
-    .filter((l) => l.price > 0 && l.qty > 0);
-}
-
-// Weighted average price and total qty over a legs array.
-function summarizeLegs(legs) {
-  const cleaned = cleanLegs(legs);
-  let totalQty = 0;
-  let totalNotional = 0;
-  for (const l of cleaned) {
-    totalQty += l.qty;
-    totalNotional += l.price * l.qty;
-  }
-  const avg = totalQty > 0 ? totalNotional / totalQty : 0;
-  const lastDate = cleaned.reduce(
-    (acc, l) => (l.date && (!acc || l.date > acc) ? l.date : acc),
-    "",
-  );
-  return { totalQty, avg, lastDate, count: cleaned.length };
-}
-
-// Days between two ISO date strings; second arg null means "today".
-function daysBetween(from, to) {
-  if (!from) return null;
-  const a = new Date(from);
-  const b = to ? new Date(to) : new Date();
-  if (isNaN(a) || isNaN(b)) return null;
-  return Math.max(0, Math.floor((b - a) / 86400000));
-}
-
-export function tradeAge(t) {
-  if (t.status?.toLowerCase() === "open") return daysBetween(t.date, null);
-  return daysBetween(t.date, t.exitDate);
-}
-
-// Total Capital now lives in the Settings sheet. Fall back to the most
-// recent per-trade value so users migrating from the old schema still see
-// sane metrics until they set a capital value.
-function resolveCapital(trades, settings) {
-  if (settings?.totalCapital) return settings.totalCapital;
-  for (let i = trades.length - 1; i >= 0; i--) {
-    const c = parseFloat(trades[i].totalCapital);
-    if (c) return c;
-  }
-  return 0;
-}
-
-function computeMetrics(trades, settings) {
-  const open = trades.filter((t) => t.status?.toLowerCase() === "open");
-  const closed = trades.filter((t) => t.status?.toLowerCase() === "closed");
-
-  const openPnl = open.reduce(
-    (s, t) => s + (t.ltp ? (t.ltp - t.entryPrice) * t.qty : 0),
-    0,
-  );
-  const capitalDeployed = open.reduce(
-    (s, t) => s + t.entryPrice * t.qty,
-    0,
-  );
-  const latestCapital = resolveCapital(trades, settings);
-  const capitalDeployedPct = latestCapital
-    ? (capitalDeployed / latestCapital) * 100
-    : 0;
-
-  const openRisk = open.reduce(
-    (s, t) => s + Math.max(0, (t.entryPrice - t.stopLoss) * t.qty),
-    0,
-  );
-  const avgRiskPct = latestCapital ? (openRisk / latestCapital) * 100 : 0;
-
-  const rMultiples = closed
-    .map((t) => {
-      const risk = (t.entryPrice - t.stopLoss) * t.qty;
-      const reward = (t.exitPrice - t.entryPrice) * t.qty;
-      if (!risk) return null;
-      return reward / risk;
-    })
-    .filter((v) => v !== null && isFinite(v));
-
-  const avgR =
-    rMultiples.length > 0
-      ? rMultiples.reduce((s, v) => s + v, 0) / rMultiples.length
-      : 0;
-
-  // Realized P&L: total profit/loss booked across all closed trades.
-  // Sum of (exit - entry) × qty per trade. Wins/losses tracked separately so
-  // we can show win-rate and a gross-profit / gross-loss split if needed.
-  let realizedPnl = 0;
-  let wins = 0;
-  let grossProfit = 0;
-  let grossLoss = 0;
-  for (const t of closed) {
-    const pnl = (t.exitPrice - t.entryPrice) * t.qty;
-    realizedPnl += pnl;
-    if (pnl > 0) {
-      wins++;
-      grossProfit += pnl;
-    } else if (pnl < 0) {
-      grossLoss += pnl;
-    }
-  }
-  const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
-
-  // Closed trades sorted newest-first — by exit date, falling back to entry
-  // date. Page 1 of the closed-trades table then shows the most recent.
-  const closedSorted = [...closed].sort((a, b) => {
-    const aKey = a.exitDate || a.date || "";
-    const bKey = b.exitDate || b.date || "";
-    return bKey.localeCompare(aKey);
-  });
-
-  return {
-    open,
-    closed,
-    closedSorted,
-    openPnl,
-    capitalDeployed,
-    capitalDeployedPct,
-    latestCapital,
-    openRisk,
-    avgRiskPct,
-    avgR,
-    realizedPnl,
-    winRate,
-    wins,
-    grossProfit,
-    grossLoss,
-  };
-}
 
 function StatCard({ label, value, sub, color = C.text }) {
   return (
@@ -1522,28 +1395,7 @@ const pagerBtn = (disabled) => ({
   opacity: disabled ? 0.5 : 1,
 });
 
-// Compute count / win-rate / avg-R over an array of closed trades.
-function aggregateClosed(trades) {
-  const n = trades.length;
-  if (n === 0) return { n: 0, winRate: 0, avgR: 0 };
-  let wins = 0;
-  let rSum = 0;
-  let rCount = 0;
-  for (const t of trades) {
-    const risk = (t.entryPrice - t.stopLoss) * t.qty;
-    const reward = (t.exitPrice - t.entryPrice) * t.qty;
-    if (reward > 0) wins++;
-    if (risk > 0 && isFinite(reward / risk)) {
-      rSum += reward / risk;
-      rCount++;
-    }
-  }
-  return {
-    n,
-    winRate: (wins / n) * 100,
-    avgR: rCount ? rSum / rCount : 0,
-  };
-}
+// `aggregateClosed` is imported from ./swingMath at the top of this file.
 
 function BreakdownTable({ title, rows }) {
   if (rows.length === 0) return null;
@@ -2195,7 +2047,9 @@ export default function SwingTracker() {
                 sub={
                   m.closed.length > 0
                     ? `${m.wins}/${m.closed.length} wins · ${m.winRate.toFixed(0)}% win rate`
-                    : "no closed trades"
+                    : m.realizedPnl !== 0
+                      ? "from partial exits"
+                      : "no exits booked"
                 }
                 color={
                   m.realizedPnl > 0
