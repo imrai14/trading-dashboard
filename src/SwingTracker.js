@@ -46,6 +46,36 @@ const fmtINR = (n) =>
 
 const fmtPct = (n) => `${(n || 0).toFixed(2)}%`;
 
+const MAX_LEGS = 3;
+
+// Normalize a leg object coming from the form (strings → numbers).
+function cleanLegs(legs) {
+  return (legs || [])
+    .map((l) => ({
+      price: parseFloat(l.price) || 0,
+      qty: parseFloat(l.qty) || 0,
+      date: l.date || "",
+    }))
+    .filter((l) => l.price > 0 && l.qty > 0);
+}
+
+// Weighted average price and total qty over a legs array.
+function summarizeLegs(legs) {
+  const cleaned = cleanLegs(legs);
+  let totalQty = 0;
+  let totalNotional = 0;
+  for (const l of cleaned) {
+    totalQty += l.qty;
+    totalNotional += l.price * l.qty;
+  }
+  const avg = totalQty > 0 ? totalNotional / totalQty : 0;
+  const lastDate = cleaned.reduce(
+    (acc, l) => (l.date && (!acc || l.date > acc) ? l.date : acc),
+    "",
+  );
+  return { totalQty, avg, lastDate, count: cleaned.length };
+}
+
 // Days between two ISO date strings; second arg null means "today".
 function daysBetween(from, to) {
   if (!from) return null;
@@ -232,6 +262,76 @@ const labelStyle = {
   marginBottom: 6,
   display: "block",
 };
+
+// Compact icon-only button for table actions. Keeps a 28x28 hit target so
+// it stays tap-friendly on mobile while saving width vs. text labels.
+const iconBtn = (color, bg = "transparent", borderColor) => ({
+  width: 28,
+  height: 28,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: 0,
+  borderRadius: 6,
+  border: `1px solid ${borderColor || color + "40"}`,
+  background: bg,
+  color,
+  cursor: "pointer",
+  lineHeight: 0,
+});
+
+// Inline SVGs — use currentColor so they pick up the button's color.
+const IconCheck = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <polyline points="3 8.5 6.5 12 13 4.5" />
+  </svg>
+);
+
+const IconPencil = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M11.5 2.5l2 2L5 13H3v-2z" />
+    <path d="M10.5 3.5l2 2" />
+  </svg>
+);
+
+const IconTrash = () => (
+  <svg
+    width="14"
+    height="14"
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.6"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M2.5 4h11" />
+    <path d="M6 4V2.5h4V4" />
+    <path d="M3.5 4l1 9.5h7l1-9.5" />
+    <path d="M6.5 7v4M9.5 7v4" />
+  </svg>
+);
 
 function SetupScreen({ onSave }) {
   const [url, setUrl] = useState("");
@@ -424,16 +524,17 @@ function SetupScreen({ onSave }) {
 const emptyForm = {
   date: new Date().toISOString().slice(0, 10),
   symbol: "",
-  entryPrice: "",
   stopLoss: "",
-  qty: "",
   status: "Open",
-  exitPrice: "",
-  exitDate: "",
   notes: "",
   marketCondition: "",
   chartLink: "",
   mistakes: "", // stored as CSV of mistake labels
+  // Leg arrays — each { price, qty, date } as strings.
+  entries: [
+    { price: "", qty: "", date: new Date().toISOString().slice(0, 10) },
+  ],
+  exits: [],
 };
 
 function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
@@ -451,25 +552,235 @@ function Field({ k, label, type = "text", placeholder = "", value, onChange }) {
   );
 }
 
+function LegEditor({
+  kind,
+  label,
+  legs,
+  onChange,
+  onAdd,
+  onRemove,
+  summary,
+  summaryLabel,
+  suggestedQty,
+  riskPct,
+  onApplySuggestedQty,
+}) {
+  const canAdd = legs.length < MAX_LEGS;
+  return (
+    <div
+      style={{
+        marginBottom: 14,
+        border: `1px solid ${C.border}`,
+        borderRadius: 8,
+        padding: "12px 14px",
+        background: C.surface,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          marginBottom: 10,
+        }}
+      >
+        <div
+          style={{
+            fontFamily: "'DM Mono', monospace",
+            fontSize: 11,
+            letterSpacing: "2px",
+            color: C.sub,
+            textTransform: "uppercase",
+          }}
+        >
+          {label} ({legs.length}/{MAX_LEGS})
+        </div>
+        {summary && summary.totalQty > 0 && (
+          <div
+            style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 11,
+              color: C.text,
+            }}
+          >
+            {summaryLabel}:{" "}
+            <span style={{ color: C.accent }}>
+              ₹{summary.avg.toFixed(2)}
+            </span>{" "}
+            · Qty:{" "}
+            <span style={{ color: C.accent }}>{summary.totalQty}</span>
+          </div>
+        )}
+      </div>
+      {legs.length === 0 && (
+        <div
+          style={{
+            fontFamily: "'DM Mono', monospace",
+            fontSize: 11,
+            color: C.muted,
+            padding: "6px 0 10px",
+          }}
+        >
+          No {label.toLowerCase()} yet.
+        </div>
+      )}
+      {legs.map((leg, idx) => (
+        <div key={idx} className="leg-row">
+          <div>
+            {idx === 0 && <label style={labelStyle}>Price</label>}
+            <input
+              style={fieldStyle}
+              type="number"
+              step="0.01"
+              value={leg.price}
+              onChange={(e) => onChange(kind, idx, "price", e.target.value)}
+            />
+          </div>
+          <div>
+            {idx === 0 && <label style={labelStyle}>Qty</label>}
+            <input
+              style={fieldStyle}
+              type="number"
+              value={leg.qty}
+              onChange={(e) => onChange(kind, idx, "qty", e.target.value)}
+            />
+            {idx === 0 &&
+              suggestedQty > 0 &&
+              Number(leg.qty) !== suggestedQty &&
+              onApplySuggestedQty && (
+                <button
+                  type="button"
+                  onClick={() => onApplySuggestedQty(idx)}
+                  style={{
+                    marginTop: 6,
+                    fontFamily: "'DM Mono', monospace",
+                    fontSize: 10,
+                    letterSpacing: "0.5px",
+                    padding: "4px 10px",
+                    borderRadius: 4,
+                    border: `1px solid ${C.accent}40`,
+                    background: C.accentDim,
+                    color: C.accent,
+                    cursor: "pointer",
+                  }}
+                >
+                  use {suggestedQty} ({riskPct}% risk)
+                </button>
+              )}
+          </div>
+          <div className="leg-date">
+            {idx === 0 && <label style={labelStyle}>Date</label>}
+            <input
+              style={fieldStyle}
+              type="date"
+              value={leg.date}
+              onChange={(e) => onChange(kind, idx, "date", e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            onClick={() => onRemove(kind, idx)}
+            title="Remove this leg"
+            style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 14,
+              width: 36,
+              height: 36,
+              borderRadius: 6,
+              border: `1px solid ${C.border}`,
+              background: "transparent",
+              color: C.muted,
+              cursor: "pointer",
+            }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        disabled={!canAdd}
+        onClick={() => onAdd(kind)}
+        style={{
+          fontFamily: "'DM Mono', monospace",
+          fontSize: 11,
+          letterSpacing: "1px",
+          padding: "6px 12px",
+          borderRadius: 4,
+          border: `1px solid ${canAdd ? C.accent + "60" : C.border}`,
+          background: canAdd ? C.accentDim : "transparent",
+          color: canAdd ? C.accent : C.muted,
+          cursor: canAdd ? "pointer" : "not-allowed",
+        }}
+      >
+        + add {kind === "entries" ? "entry" : "exit"} leg
+      </button>
+    </div>
+  );
+}
+
 function TradeForm({ initial, onSubmit, onCancel, settings }) {
-  const [form, setForm] = useState(() => ({
-    ...emptyForm,
-    ...(initial || {}),
-  }));
+  const [form, setForm] = useState(() => {
+    const base = { ...emptyForm, ...(initial || {}) };
+    const toFormLegs = (arr) =>
+      (arr || []).map((l) => ({
+        price: l.price ? String(l.price) : "",
+        qty: l.qty ? String(l.qty) : "",
+        date: l.date || "",
+      }));
+    const e = toFormLegs(initial?.entries);
+    const x = toFormLegs(initial?.exits);
+    base.entries = e.length > 0 ? e : emptyForm.entries;
+    base.exits = x;
+    return base;
+  });
   const [saving, setSaving] = useState(false);
 
   const set = useCallback((k, v) => setForm((f) => ({ ...f, [k]: v })), []);
 
-  // Auto-qty: (capital × risk%) / (entry − SL). Zero if any input is missing.
-  const entry = parseFloat(form.entryPrice) || 0;
+  // Leg editing helpers.
+  const setLeg = (kind, idx, field, value) => {
+    setForm((f) => {
+      const next = [...(f[kind] || [])];
+      next[idx] = { ...next[idx], [field]: value };
+      return { ...f, [kind]: next };
+    });
+  };
+  const addLeg = (kind) => {
+    setForm((f) => {
+      const list = f[kind] || [];
+      if (list.length >= MAX_LEGS) return f;
+      const today = new Date().toISOString().slice(0, 10);
+      return {
+        ...f,
+        [kind]: [...list, { price: "", qty: "", date: today }],
+      };
+    });
+  };
+  const removeLeg = (kind, idx) => {
+    setForm((f) => {
+      const list = f[kind] || [];
+      return { ...f, [kind]: list.filter((_, i) => i !== idx) };
+    });
+  };
+
+  // Live summary over current legs.
+  const entrySummary = summarizeLegs(form.entries);
+  const exitSummary = summarizeLegs(form.exits);
   const sl = parseFloat(form.stopLoss) || 0;
   const capital = settings?.totalCapital || 0;
   const riskPct = settings?.riskPerTradePct || 0;
-  const perShareRisk = entry - sl;
+  const perShareRisk = entrySummary.avg - sl;
   const suggestedQty =
     capital > 0 && riskPct > 0 && perShareRisk > 0
       ? Math.max(1, Math.floor((capital * (riskPct / 100)) / perShareRisk))
       : 0;
+
+  const realized =
+    exitSummary.totalQty > 0
+      ? (exitSummary.avg - entrySummary.avg) * exitSummary.totalQty
+      : 0;
+  const openQty = Math.max(0, entrySummary.totalQty - exitSummary.totalQty);
 
   // Mistakes are stored as a CSV string in the sheet but edited as a set.
   const selectedMistakes = (form.mistakes || "")
@@ -484,9 +795,28 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
   };
 
   const submit = async () => {
-    if (!form.symbol || !form.entryPrice || !form.stopLoss || !form.qty) {
-      alert("Symbol, Entry, Stop Loss, and Qty are required.");
+    if (!form.symbol || !form.stopLoss) {
+      alert("Symbol and Stop Loss are required.");
       return;
+    }
+    if (entrySummary.totalQty <= 0) {
+      alert("Add at least one entry leg with price and qty.");
+      return;
+    }
+    if (exitSummary.totalQty > entrySummary.totalQty) {
+      alert("Total exit qty can't exceed total entry qty.");
+      return;
+    }
+    if (
+      form.status?.toLowerCase() === "closed" &&
+      exitSummary.totalQty !== entrySummary.totalQty
+    ) {
+      if (
+        !window.confirm(
+          `Closed trade but exit qty (${exitSummary.totalQty}) ≠ entry qty (${entrySummary.totalQty}). Save anyway?`,
+        )
+      )
+        return;
     }
     setSaving(true);
     try {
@@ -507,16 +837,9 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
         padding: "22px 24px",
       }}
     >
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: 14,
-          marginBottom: 16,
-        }}
-      >
-        <Field k="date" label="Entry Date" type="date" value={form.date} onChange={set} />
+      <div className="form-grid">
         <Field k="symbol" label="Symbol" placeholder="e.g. RELIANCE" value={form.symbol} onChange={set} />
+        <Field k="stopLoss" label="Stop Loss" type="number" value={form.stopLoss} onChange={set} />
         <div>
           <label style={labelStyle}>Status</label>
           <select
@@ -527,38 +850,6 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
             <option value="Open">Open</option>
             <option value="Closed">Closed</option>
           </select>
-        </div>
-        <Field k="entryPrice" label="Entry Price" type="number" value={form.entryPrice} onChange={set} />
-        <Field k="stopLoss" label="Stop Loss" type="number" value={form.stopLoss} onChange={set} />
-        <div>
-          <label style={labelStyle}>Qty</label>
-          <input
-            style={fieldStyle}
-            type="number"
-            value={form.qty ?? ""}
-            onChange={(e) => set("qty", e.target.value)}
-          />
-          {suggestedQty > 0 && Number(form.qty) !== suggestedQty && (
-            <button
-              type="button"
-              onClick={() => set("qty", String(suggestedQty))}
-              style={{
-                marginTop: 6,
-                fontFamily: "'DM Mono', monospace",
-                fontSize: 10,
-                letterSpacing: "0.5px",
-                padding: "4px 10px",
-                borderRadius: 4,
-                border: `1px solid ${C.accent}40`,
-                background: C.accentDim,
-                color: C.accent,
-                cursor: "pointer",
-              }}
-              title={`${riskPct}% of ${fmtINR(capital)} ÷ (${entry} − ${sl})`}
-            >
-              use {suggestedQty} ({riskPct}% risk)
-            </button>
-          )}
         </div>
         <div>
           <label style={labelStyle}>Market Condition</label>
@@ -583,13 +874,91 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
           value={form.chartLink}
           onChange={set}
         />
-        {form.status === "Closed" && (
-          <>
-            <Field k="exitPrice" label="Exit Price" type="number" value={form.exitPrice} onChange={set} />
-            <Field k="exitDate" label="Exit Date" type="date" value={form.exitDate} onChange={set} />
-          </>
-        )}
       </div>
+
+      <LegEditor
+        kind="entries"
+        label="Entries"
+        legs={form.entries}
+        onChange={setLeg}
+        onAdd={addLeg}
+        onRemove={removeLeg}
+        summary={entrySummary}
+        summaryLabel="Avg Entry"
+        suggestedQty={suggestedQty}
+        riskPct={riskPct}
+        onApplySuggestedQty={(idx) =>
+          setLeg("entries", idx, "qty", String(suggestedQty))
+        }
+      />
+
+      <LegEditor
+        kind="exits"
+        label="Exits"
+        legs={form.exits}
+        onChange={setLeg}
+        onAdd={addLeg}
+        onRemove={removeLeg}
+        summary={exitSummary}
+        summaryLabel="Avg Exit"
+      />
+
+      {/* Live P&L preview — only once both sides have data. */}
+      {(entrySummary.totalQty > 0 || exitSummary.totalQty > 0) && (
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: 12,
+            margin: "14px 0",
+            padding: "12px 14px",
+            borderRadius: 8,
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+            fontFamily: "'DM Mono', monospace",
+            fontSize: 12,
+          }}
+        >
+          <span style={{ color: C.sub }}>
+            Qty: <span style={{ color: C.text }}>{entrySummary.totalQty}</span>
+            {exitSummary.totalQty > 0 && (
+              <>
+                {" "}
+                · Exited:{" "}
+                <span style={{ color: C.text }}>{exitSummary.totalQty}</span>
+                {openQty > 0 && (
+                  <>
+                    {" "}
+                    · Open: <span style={{ color: C.text }}>{openQty}</span>
+                  </>
+                )}
+              </>
+            )}
+          </span>
+          {exitSummary.totalQty > 0 && (
+            <span style={{ color: C.sub }}>
+              Realized P&L:{" "}
+              <span style={{ color: realized >= 0 ? C.green : C.red }}>
+                {realized >= 0 ? "+" : ""}
+                {fmtINR(realized)}
+              </span>
+            </span>
+          )}
+          {entrySummary.totalQty > 0 && sl > 0 && (
+            <span style={{ color: C.sub }}>
+              Risk @ SL:{" "}
+              <span style={{ color: C.accent }}>
+                {fmtINR(
+                  Math.max(
+                    0,
+                    (entrySummary.avg - sl) * entrySummary.totalQty,
+                  ),
+                )}
+              </span>
+            </span>
+          )}
+        </div>
+      )}
       <div style={{ marginBottom: 14 }}>
         <label style={labelStyle}>Mistakes</label>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
@@ -782,8 +1151,23 @@ function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose })
                         textAlign: "right",
                         fontFamily: "'DM Mono', monospace",
                       }}
+                      title={
+                        (t.entries || []).length > 1
+                          ? (t.entries || [])
+                              .map(
+                                (l) =>
+                                  `${l.price} × ${l.qty}${l.date ? " · " + l.date : ""}`,
+                              )
+                              .join("\n")
+                          : undefined
+                      }
                     >
                       {t.entryPrice}
+                      {(t.entries || []).length > 1 && (
+                        <div style={{ fontSize: 10, color: C.sub }}>
+                          avg · {t.entries.length} legs
+                        </div>
+                      )}
                     </td>
                     <td
                       style={{
@@ -924,56 +1308,45 @@ function TradesTable({ title, trades, capital, onEdit, onDelete, onQuickClose })
                         textAlign: "right",
                       }}
                     >
-                      {onQuickClose && t.status?.toLowerCase() === "open" && (
+                      <div
+                        style={{
+                          display: "inline-flex",
+                          gap: 6,
+                          justifyContent: "flex-end",
+                        }}
+                      >
+                        {onQuickClose &&
+                          t.status?.toLowerCase() === "open" && (
+                            <button
+                              onClick={() => onQuickClose(t)}
+                              title={
+                                t.ltp
+                                  ? `Close @ LTP ${t.ltp}`
+                                  : "Close (enter exit price)"
+                              }
+                              aria-label="Quick close"
+                              style={iconBtn(C.green, C.greenDim)}
+                            >
+                              <IconCheck />
+                            </button>
+                          )}
                         <button
-                          onClick={() => onQuickClose(t)}
-                          title={t.ltp ? `Close @ LTP ${t.ltp}` : "Close (enter exit price)"}
-                          style={{
-                            fontFamily: "'DM Mono', monospace",
-                            fontSize: 10,
-                            padding: "5px 9px",
-                            borderRadius: 4,
-                            border: `1px solid ${C.green}40`,
-                            background: C.greenDim,
-                            color: C.green,
-                            cursor: "pointer",
-                            marginRight: 6,
-                          }}
+                          onClick={() => onEdit(t)}
+                          title="Edit trade"
+                          aria-label="Edit"
+                          style={iconBtn(C.sub, "transparent", C.border)}
                         >
-                          close
+                          <IconPencil />
                         </button>
-                      )}
-                      <button
-                        onClick={() => onEdit(t)}
-                        style={{
-                          fontFamily: "'DM Mono', monospace",
-                          fontSize: 10,
-                          padding: "5px 9px",
-                          borderRadius: 4,
-                          border: `1px solid ${C.border}`,
-                          background: "transparent",
-                          color: C.sub,
-                          cursor: "pointer",
-                          marginRight: 6,
-                        }}
-                      >
-                        edit
-                      </button>
-                      <button
-                        onClick={() => onDelete(t)}
-                        style={{
-                          fontFamily: "'DM Mono', monospace",
-                          fontSize: 10,
-                          padding: "5px 9px",
-                          borderRadius: 4,
-                          border: `1px solid ${C.redDim}`,
-                          background: "transparent",
-                          color: C.red,
-                          cursor: "pointer",
-                        }}
-                      >
-                        del
-                      </button>
+                        <button
+                          onClick={() => onDelete(t)}
+                          title="Delete trade"
+                          aria-label="Delete"
+                          style={iconBtn(C.red, "transparent", C.redDim)}
+                        >
+                          <IconTrash />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 );
@@ -1181,12 +1554,34 @@ export default function SwingTracker() {
   const m = useMemo(() => computeMetrics(trades, settings), [trades, settings]);
 
   const handleSave = async (form) => {
+    const entryLegs = cleanLegs(form.entries);
+    const exitLegs = cleanLegs(form.exits);
+    const entrySummary = summarizeLegs(entryLegs);
+    const exitSummary = summarizeLegs(exitLegs);
+    // Date == earliest entry leg, so Open P&L / age use the first buy.
+    const firstEntryDate =
+      entryLegs.reduce(
+        (acc, l) => (l.date && (!acc || l.date < acc) ? l.date : acc),
+        "",
+      ) || form.date || new Date().toISOString().slice(0, 10);
+
     const trade = {
-      ...form,
-      entryPrice: parseFloat(form.entryPrice) || 0,
+      date: firstEntryDate,
+      symbol: form.symbol,
       stopLoss: parseFloat(form.stopLoss) || 0,
-      qty: parseFloat(form.qty) || 0,
-      exitPrice: parseFloat(form.exitPrice) || 0,
+      status: form.status,
+      notes: form.notes || "",
+      marketCondition: form.marketCondition || "",
+      chartLink: form.chartLink || "",
+      mistakes: form.mistakes || "",
+      // Derived summary fields (kept in the legacy columns for readability).
+      entryPrice: Number(entrySummary.avg.toFixed(4)),
+      qty: entrySummary.totalQty,
+      exitPrice: Number(exitSummary.avg.toFixed(4)),
+      exitDate: exitSummary.lastDate,
+      // Canonical leg data.
+      entries: entryLegs.length ? JSON.stringify(entryLegs) : "",
+      exits: exitLegs.length ? JSON.stringify(exitLegs) : "",
       // LTP is auto-computed by GOOGLEFINANCE in the sheet — we don't send it.
     };
     if (editing) {
@@ -1244,13 +1639,29 @@ export default function SwingTracker() {
     }
   };
 
-  // Pre-populate the form with today's date + LTP so the user just hits Save.
+  // Pre-populate the form with an exit leg at LTP for the unfilled qty.
   const handleQuickClose = (t) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const entrySummary = summarizeLegs(t.entries || []);
+    const exitSummary = summarizeLegs(t.exits || []);
+    const remainingQty = Math.max(
+      0,
+      entrySummary.totalQty - exitSummary.totalQty,
+    );
+    const newExitLeg = {
+      price: t.ltp ? String(t.ltp) : "",
+      qty: remainingQty > 0 ? String(remainingQty) : "",
+      date: today,
+    };
+    const existingExits = (t.exits || []).map((l) => ({
+      price: String(l.price),
+      qty: String(l.qty),
+      date: l.date,
+    }));
     setEditing({
       ...t,
       status: "Closed",
-      exitPrice: t.ltp || t.exitPrice || "",
-      exitDate: new Date().toISOString().slice(0, 10),
+      exits: [...existingExits, newExitLeg].slice(0, MAX_LEGS),
     });
     setFormOpen(true);
   };
@@ -1267,22 +1678,59 @@ export default function SwingTracker() {
 
   return (
     <div
+      className="ts-page"
       style={{
         minHeight: "100vh",
         background: C.bg,
         fontFamily: "'Roboto', sans-serif",
         color: C.text,
-        padding: "40px 24px",
       }}
     >
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Roboto:wght@400;600;700;800&display=swap');
         @keyframes fadeUp { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:translateY(0); } }
         * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: ${C.bg}; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+        html, body { color-scheme: dark; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; } ::-webkit-scrollbar-track { background: ${C.bg}; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+
+        /* Safari-safe select: kill native chrome, add custom caret, ensure dark popup.
+           !important is needed because inline fieldStyle sets the 'background' shorthand,
+           which would otherwise wipe background-image. */
+        select {
+          -webkit-appearance: none;
+          -moz-appearance: none;
+          appearance: none;
+          background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%237a829b' d='M6 8L0 0h12z'/></svg>") !important;
+          background-repeat: no-repeat !important;
+          background-position: right 12px center !important;
+          background-size: 10px 7px !important;
+          padding-right: 32px !important;
+          line-height: 1.2;
+          color-scheme: dark;
+          cursor: pointer;
+        }
+        select::-ms-expand { display: none; }
+        select option { background: ${C.surface}; color: ${C.text}; }
+        /* Match input vs select height across browsers (Safari adds extra px otherwise) */
+        input, select, textarea { font: inherit; }
+        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+
         .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
         @media (max-width: 800px) { .stat-grid { grid-template-columns: repeat(2, 1fr); } }
         @media (max-width: 500px) { .stat-grid { grid-template-columns: 1fr; } }
+
+        .form-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 16px; }
+        @media (max-width: 700px) { .form-grid { grid-template-columns: 1fr 1fr; } }
+        @media (max-width: 480px) { .form-grid { grid-template-columns: 1fr; } }
+
+        .leg-row { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 10px; align-items: end; margin-bottom: 10px; }
+        @media (max-width: 600px) {
+          .leg-row { grid-template-columns: 1fr 1fr auto; }
+          .leg-row > .leg-date { grid-column: 1 / -1; }
+        }
+
+        .ts-page { padding: 40px 24px; }
+        @media (max-width: 600px) { .ts-page { padding: 20px 14px; } }
       `}</style>
 
       <div style={{ maxWidth: 1120, margin: "0 auto" }}>

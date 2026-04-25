@@ -87,22 +87,68 @@ export function normalizeTrade(raw) {
     if (!isNaN(d)) return d.toISOString().slice(0, 10);
     return s;
   };
+
+  // Parse a JSON leg array; each leg is {price, qty, date}. Fields are coerced
+  // and invalid rows are skipped.
+  const parseLegs = (raw) => {
+    if (!raw) return [];
+    try {
+      const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (!Array.isArray(arr)) return [];
+      return arr
+        .map((l) => ({
+          price: num(l.price),
+          qty: num(l.qty),
+          date: dateStr(l.date || ""),
+        }))
+        .filter((l) => l.price > 0 && l.qty > 0);
+    } catch {
+      return [];
+    }
+  };
+
+  const legacyEntryPrice = num(raw["Entry Price"]);
+  const legacyQty = num(raw["Qty"]);
+  const legacyExitPrice = num(raw["Exit Price"]);
+  const legacyExitDate = dateStr(raw["Exit Date"]);
+  const tradeDate = dateStr(raw["Date"]);
+
+  let entries = parseLegs(raw["Entries"]);
+  let exits = parseLegs(raw["Exits"]);
+
+  // Legacy rows (no JSON yet): synthesize one leg from the flat columns.
+  if (entries.length === 0 && legacyEntryPrice > 0 && legacyQty > 0) {
+    entries = [{ price: legacyEntryPrice, qty: legacyQty, date: tradeDate }];
+  }
+  if (exits.length === 0 && legacyExitPrice > 0) {
+    exits = [
+      {
+        price: legacyExitPrice,
+        // Best-effort qty — match total entry qty so P&L math stays stable.
+        qty: legacyQty,
+        date: legacyExitDate,
+      },
+    ];
+  }
+
   return {
     _row: raw._row,
-    date: dateStr(raw["Date"]),
+    date: tradeDate,
     symbol: String(raw["Symbol"] ?? ""),
-    entryPrice: num(raw["Entry Price"]),
+    entryPrice: legacyEntryPrice,
     stopLoss: num(raw["Stop Loss"]),
     target: num(raw["Target"]), // legacy, not shown in UI
-    qty: num(raw["Qty"]),
+    qty: legacyQty,
     status: String(raw["Status"] ?? "Open"),
-    exitPrice: num(raw["Exit Price"]),
-    exitDate: dateStr(raw["Exit Date"]),
+    exitPrice: legacyExitPrice,
+    exitDate: legacyExitDate,
     notes: String(raw["Notes"] ?? ""),
     ltp: num(raw["LTP"]),
     marketCondition: String(raw["Market Condition"] ?? ""),
     chartLink: String(raw["Chart Link"] ?? ""),
     mistakes: String(raw["Mistakes"] ?? ""),
+    entries,
+    exits,
   };
 }
 

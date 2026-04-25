@@ -627,12 +627,38 @@ function Dashboard({ datasets, onUpdate, onRemove, onReset }) {
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Roboto', sans-serif", color: C.text, padding: "40px 24px" }}>
+    <div className="ts-page" style={{ minHeight: "100vh", background: C.bg, fontFamily: "'Roboto', sans-serif", color: C.text }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Roboto:wght@400;600;700;800&display=swap');
         @keyframes fadeUp { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:translateY(0); } }
         * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: ${C.bg}; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+        html, body { color-scheme: dark; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; } ::-webkit-scrollbar-track { background: ${C.bg}; } ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+
+        /* Safari-safe select: kill native chrome, add custom caret, ensure dark popup.
+           !important is needed because inline styles often set the 'background' shorthand,
+           which would otherwise wipe background-image. */
+        select {
+          -webkit-appearance: none;
+          -moz-appearance: none;
+          appearance: none;
+          background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'><path fill='%237a829b' d='M6 8L0 0h12z'/></svg>") !important;
+          background-repeat: no-repeat !important;
+          background-position: right 12px center !important;
+          background-size: 10px 7px !important;
+          padding-right: 32px !important;
+          line-height: 1.2;
+          color-scheme: dark;
+          cursor: pointer;
+        }
+        select::-ms-expand { display: none; }
+        select option { background: ${C.surface}; color: ${C.text}; }
+        input, select, textarea { font: inherit; }
+        input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); cursor: pointer; }
+
+        .ts-page { padding: 40px 24px; }
+        @media (max-width: 600px) { .ts-page { padding: 20px 14px; } }
+
         .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
         .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
         .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
