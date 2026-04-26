@@ -5,6 +5,7 @@ import {
   SHEET_HEADERS,
   MISTAKE_OPTIONS,
   MARKET_CONDITIONS,
+  STRATEGY_OPTIONS,
 } from "./appsScriptCode";
 import {
   loadConfig,
@@ -434,6 +435,7 @@ const emptyForm = {
   status: "Open",
   notes: "",
   marketCondition: "",
+  strategy: "",
   chartLink: "",
   mistakes: "", // stored as CSV of mistake labels
   // Leg arrays — each { price, qty, date } as strings.
@@ -781,6 +783,21 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
             {MARKET_CONDITIONS.map((c) => (
               <option key={c} value={c}>
                 {c}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Strategy</label>
+          <select
+            style={fieldStyle}
+            value={form.strategy || ""}
+            onChange={(e) => set("strategy", e.target.value)}
+          >
+            <option value="">—</option>
+            {STRATEGY_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
               </option>
             ))}
           </select>
@@ -1181,6 +1198,22 @@ function TradesTable({
                             {t.marketCondition}
                           </span>
                         )}
+                        {t.strategy && (
+                          <span
+                            style={{
+                              fontFamily: "'DM Mono', monospace",
+                              fontSize: 10,
+                              letterSpacing: "0.5px",
+                              padding: "3px 8px",
+                              borderRadius: 999,
+                              background: C.greenDim,
+                              color: C.green,
+                              border: `1px solid ${C.green}40`,
+                            }}
+                          >
+                            {t.strategy}
+                          </span>
+                        )}
                         {(t.mistakes || "")
                           .split(",")
                           .map((s) => s.trim())
@@ -1224,6 +1257,7 @@ function TradesTable({
                           </a>
                         )}
                         {!t.marketCondition &&
+                          !t.strategy &&
                           !t.mistakes &&
                           !t.chartLink && (
                             <span style={{ color: C.muted, fontSize: 12 }}>—</span>
@@ -1600,6 +1634,7 @@ export default function SwingTracker() {
       status: form.status,
       notes: form.notes || "",
       marketCondition: form.marketCondition || "",
+      strategy: form.strategy || "",
       chartLink: form.chartLink || "",
       mistakes: form.mistakes || "",
       // Derived summary fields (kept in the legacy columns for readability).

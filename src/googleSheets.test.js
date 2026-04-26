@@ -34,6 +34,7 @@ describe("normalizeTrade", () => {
       marketCondition: "",
       chartLink: "",
       mistakes: "",
+      strategy: "",
       entries: [],
       exits: [],
     });
@@ -115,6 +116,24 @@ describe("normalizeTrade", () => {
     expect(t.marketCondition).toBe("");
     expect(t.chartLink).toBe("");
     expect(t.mistakes).toBe("");
+    expect(t.strategy).toBe("");
+  });
+
+  // ---------- Strategy field ----------
+  test("preserves the Strategy column when present", () => {
+    const t = normalizeTrade({ Symbol: "X", Strategy: "Breakout" });
+    expect(t.strategy).toBe("Breakout");
+  });
+
+  test("coerces non-string Strategy values to string", () => {
+    // Arbitrary numbers/objects can land in a sheet cell — must not blow up.
+    const t = normalizeTrade({ Symbol: "X", Strategy: 42 });
+    expect(t.strategy).toBe("42");
+  });
+
+  test("Strategy stays empty when sheet has the column but the cell is blank", () => {
+    const t = normalizeTrade({ Symbol: "X", Strategy: "" });
+    expect(t.strategy).toBe("");
   });
 
   test("coerces non-string symbols to string", () => {

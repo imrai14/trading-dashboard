@@ -147,6 +147,7 @@ export function normalizeTrade(raw) {
     marketCondition: String(raw["Market Condition"] ?? ""),
     chartLink: String(raw["Chart Link"] ?? ""),
     mistakes: String(raw["Mistakes"] ?? ""),
+    strategy: String(raw["Strategy"] ?? ""),
     entries,
     exits,
   };

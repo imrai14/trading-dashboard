@@ -19,10 +19,25 @@ export const SHEET_HEADERS = [
   "Mistakes",
   "Entries", // JSON: [{price, qty, date}, ...] up to 3 legs
   "Exits", // JSON: [{price, qty, date}, ...] up to 3 legs
+  "Strategy", // dropdown — see STRATEGY_OPTIONS
 ];
 
 export const MISTAKE_OPTIONS = ["No SL", "Late Entry", "Early Entry", "FOMO"];
 export const MARKET_CONDITIONS = ["Trending", "Sideways", "Downtrend"];
+export const STRATEGY_OPTIONS = [
+  "Breakout",
+  "Breakdown",
+  "Reversal",
+  "Trend Following",
+  "Support & Resistance",
+  "EMA Crossover",
+  "Gap Up/Down",
+  "VWAP",
+  "Price Action",
+  "Options Strategy",
+  "Pull Back",
+  "Base",
+];
 
 export const APPS_SCRIPT_CODE = `// ─── TradeScope Swing Tracker · Google Apps Script ───
 // 1. Change SECRET below to a password you'll remember.
@@ -62,7 +77,7 @@ function doPost(e) {
 
   const sheet = getSheet_();
   const t = body.trade || {};
-  // 17 columns — Target (col 5) and Total Capital (col 7) are empty for new trades,
+  // 18 columns — Target (col 5) and Total Capital (col 7) are empty for new trades,
   // LTP (col 12) is written separately as a formula. Entries/Exits are JSON strings.
   const row = [
     t.date || '',
@@ -82,6 +97,7 @@ function doPost(e) {
     t.mistakes || '',
     t.entries || '',          // JSON string of entry legs
     t.exits || '',            // JSON string of exit legs
+    t.strategy || '',         // Strategy dropdown
   ];
 
   if (body.action === 'add') {
@@ -92,9 +108,9 @@ function doPost(e) {
   }
   if (body.action === 'update') {
     const rowIdx = Number(body.rowIndex) + 2; // +1 header, +1 for 1-indexed
-    // Write cols 1-11 and 13-17; skip col 12 (LTP formula).
+    // Write cols 1-11 and 13-18; skip col 12 (LTP formula).
     sheet.getRange(rowIdx, 1, 1, 11).setValues([row.slice(0, 11)]);
-    sheet.getRange(rowIdx, 13, 1, 5).setValues([row.slice(12, 17)]);
+    sheet.getRange(rowIdx, 13, 1, 6).setValues([row.slice(12, 18)]);
     sheet.getRange(rowIdx, LTP_COL).setFormula(ltpFormulaFor_(rowIdx));
     return jsonOut({ ok: true, trades: readAll_(), settings: readSettings_() });
   }
