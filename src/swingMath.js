@@ -169,6 +169,77 @@ export function computeMetrics(trades, settings) {
   };
 }
 
+// Tri-state sort: when key or dir is falsy, returns a copy of the input
+// untouched (so callers can fall back to whatever order the caller-supplied
+// trades came in — e.g. closedSorted by exit date).
+// Strings compare case-insensitively via localeCompare. Missing values
+// (null / undefined / "" / non-finite numbers) sort to the end regardless
+// of direction so the user can still see them but they don't pollute the
+// "best/worst" view.
+export function sortTrades(trades, key, dir) {
+  const list = Array.isArray(trades) ? trades : [];
+  if (!key || !dir) return list.slice();
+  const mult = dir === "desc" ? -1 : 1;
+  const isMissing = (v) =>
+    v == null ||
+    v === "" ||
+    (typeof v === "number" && !Number.isFinite(v));
+  return list.slice().sort((a, b) => {
+    const av = a == null ? undefined : a[key];
+    const bv = b == null ? undefined : b[key];
+    const am = isMissing(av);
+    const bm = isMissing(bv);
+    if (am && bm) return 0;
+    if (am) return 1;
+    if (bm) return -1;
+    if (typeof av === "number" && typeof bv === "number") {
+      return (av - bv) * mult;
+    }
+    return (
+      String(av)
+        .toLowerCase()
+        .localeCompare(String(bv).toLowerCase()) * mult
+    );
+  });
+}
+
+// Filter trades by a set of optional criteria.
+// - symbol: case-insensitive substring (matches anywhere in the ticker)
+// - marketCondition / strategy: exact-string match (drop-down equality)
+// - mistake: exact match against ANY entry in the comma-separated mistakes list
+// Empty/falsy values for any criterion skip that filter; an empty filters
+// object returns the input list (shallow-copied) unchanged.
+export function filterTrades(trades, filters) {
+  const list = Array.isArray(trades) ? trades : [];
+  if (!filters) return list.slice();
+  const symbolNeedle = String(filters.symbol || "").trim().toLowerCase();
+  const marketCondition = String(filters.marketCondition || "").trim();
+  const strategy = String(filters.strategy || "").trim();
+  const mistakeNeedle = String(filters.mistake || "").trim();
+  if (!symbolNeedle && !marketCondition && !strategy && !mistakeNeedle) {
+    return list.slice();
+  }
+  return list.filter((t) => {
+    if (!t) return false;
+    if (
+      symbolNeedle &&
+      !String(t.symbol || "").toLowerCase().includes(symbolNeedle)
+    ) {
+      return false;
+    }
+    if (marketCondition && t.marketCondition !== marketCondition) return false;
+    if (strategy && t.strategy !== strategy) return false;
+    if (mistakeNeedle) {
+      const tokens = String(t.mistakes || "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (!tokens.includes(mistakeNeedle)) return false;
+    }
+    return true;
+  });
+}
+
 // Compute count / win-rate / avg-R over an array of closed trades.
 // Used by the per-symbol breakdown tables.
 export function aggregateClosed(trades) {

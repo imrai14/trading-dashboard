@@ -9,6 +9,8 @@ import {
   tradeAge,
   resolveCapital,
   aggregateClosed,
+  sortTrades,
+  filterTrades,
 } from "./swingMath";
 
 describe("cleanLegs", () => {
@@ -280,5 +282,189 @@ describe("aggregateClosed", () => {
       { entryPrice: 100, exitPrice: 110, qty: 10, stopLoss: 95 }, // R = 2
     ]);
     expect(out.avgR).toBeCloseTo(2, 5);
+  });
+});
+
+describe("sortTrades", () => {
+  const trades = [
+    { symbol: "RELIANCE", entryPrice: 1200, qty: 10 },
+    { symbol: "tcs",      entryPrice: 3500, qty: 5 },
+    { symbol: "INFY",     entryPrice: 1500, qty: 20 },
+  ];
+
+  test("returns a copy of the input when key/dir is missing", () => {
+    const out = sortTrades(trades, "", "");
+    expect(out).toEqual(trades);
+    expect(out).not.toBe(trades); // shallow copy, not same ref
+  });
+
+  test("returns a copy when only key is given but no direction", () => {
+    expect(sortTrades(trades, "symbol", "")).toEqual(trades);
+  });
+
+  test("returns a copy when only direction is given but no key", () => {
+    expect(sortTrades(trades, "", "asc")).toEqual(trades);
+  });
+
+  test("sorts strings ascending case-insensitively", () => {
+    const out = sortTrades(trades, "symbol", "asc");
+    expect(out.map((t) => t.symbol)).toEqual(["INFY", "RELIANCE", "tcs"]);
+  });
+
+  test("sorts strings descending case-insensitively", () => {
+    const out = sortTrades(trades, "symbol", "desc");
+    expect(out.map((t) => t.symbol)).toEqual(["tcs", "RELIANCE", "INFY"]);
+  });
+
+  test("sorts numeric fields ascending", () => {
+    const out = sortTrades(trades, "entryPrice", "asc");
+    expect(out.map((t) => t.entryPrice)).toEqual([1200, 1500, 3500]);
+  });
+
+  test("sorts numeric fields descending", () => {
+    const out = sortTrades(trades, "entryPrice", "desc");
+    expect(out.map((t) => t.entryPrice)).toEqual([3500, 1500, 1200]);
+  });
+
+  test("does not mutate the input array", () => {
+    const original = [...trades];
+    sortTrades(trades, "symbol", "asc");
+    expect(trades).toEqual(original);
+  });
+
+  test("missing values sort to the end (ascending)", () => {
+    const out = sortTrades(
+      [{ qty: 10 }, { qty: null }, { qty: 5 }, { qty: undefined }, { qty: "" }],
+      "qty",
+      "asc",
+    );
+    expect(out.map((t) => t.qty)).toEqual([5, 10, null, undefined, ""]);
+  });
+
+  test("missing values sort to the end (descending)", () => {
+    const out = sortTrades(
+      [{ qty: 10 }, { qty: null }, { qty: 5 }],
+      "qty",
+      "desc",
+    );
+    expect(out.map((t) => t.qty)).toEqual([10, 5, null]);
+  });
+
+  test("non-finite numbers (NaN / Infinity) are treated as missing", () => {
+    const out = sortTrades(
+      [{ pnl: 100 }, { pnl: NaN }, { pnl: -50 }, { pnl: Infinity }],
+      "pnl",
+      "asc",
+    );
+    expect(out.map((t) => t.pnl)).toEqual([-50, 100, NaN, Infinity]);
+  });
+
+  test("empty input returns empty array", () => {
+    expect(sortTrades([], "symbol", "asc")).toEqual([]);
+  });
+
+  test("non-array input is treated as empty", () => {
+    expect(sortTrades(null, "symbol", "asc")).toEqual([]);
+    expect(sortTrades(undefined, "symbol", "asc")).toEqual([]);
+  });
+
+  test("rows with null trade entry are skipped safely", () => {
+    // Don't crash if the trade list has a null/undefined slot.
+    const out = sortTrades([{ symbol: "B" }, null, { symbol: "A" }], "symbol", "asc");
+    expect(out[0].symbol).toBe("A");
+    expect(out[1].symbol).toBe("B");
+  });
+});
+
+describe("filterTrades", () => {
+  const trades = [
+    {
+      symbol: "RELIANCE",
+      marketCondition: "Trending",
+      strategy: "Breakout",
+      mistakes: "FOMO,Late Entry",
+    },
+    {
+      symbol: "TCS",
+      marketCondition: "Sideways",
+      strategy: "Reversal",
+      mistakes: "",
+    },
+    {
+      symbol: "INFY",
+      marketCondition: "Trending",
+      strategy: "VWAP",
+      mistakes: "No SL",
+    },
+  ];
+
+  test("returns a copy of input when filters is null/empty", () => {
+    expect(filterTrades(trades, null)).toEqual(trades);
+    expect(filterTrades(trades, {})).toEqual(trades);
+    expect(filterTrades(trades, { symbol: "" })).toEqual(trades);
+  });
+
+  test("symbol filter is case-insensitive substring match", () => {
+    expect(filterTrades(trades, { symbol: "rel" }).map((t) => t.symbol)).toEqual([
+      "RELIANCE",
+    ]);
+    expect(filterTrades(trades, { symbol: "I" }).map((t) => t.symbol)).toEqual([
+      "RELIANCE",
+      "INFY",
+    ]);
+  });
+
+  test("marketCondition filter is exact match", () => {
+    expect(
+      filterTrades(trades, { marketCondition: "Trending" }).map((t) => t.symbol),
+    ).toEqual(["RELIANCE", "INFY"]);
+  });
+
+  test("strategy filter is exact match", () => {
+    expect(filterTrades(trades, { strategy: "VWAP" }).map((t) => t.symbol)).toEqual([
+      "INFY",
+    ]);
+  });
+
+  test("mistake filter matches any token in the comma-separated list", () => {
+    expect(filterTrades(trades, { mistake: "FOMO" }).map((t) => t.symbol)).toEqual([
+      "RELIANCE",
+    ]);
+    expect(filterTrades(trades, { mistake: "No SL" }).map((t) => t.symbol)).toEqual([
+      "INFY",
+    ]);
+  });
+
+  test("multiple criteria are AND-combined", () => {
+    expect(
+      filterTrades(trades, {
+        marketCondition: "Trending",
+        strategy: "Breakout",
+      }).map((t) => t.symbol),
+    ).toEqual(["RELIANCE"]);
+  });
+
+  test("empty trades list returns empty list", () => {
+    expect(filterTrades([], { symbol: "X" })).toEqual([]);
+  });
+
+  test("non-array input is treated as empty list", () => {
+    expect(filterTrades(null, { symbol: "X" })).toEqual([]);
+  });
+
+  test("does not mutate the input array", () => {
+    const snapshot = JSON.parse(JSON.stringify(trades));
+    filterTrades(trades, { symbol: "rel", strategy: "Breakout" });
+    expect(trades).toEqual(snapshot);
+  });
+
+  test("trims whitespace around symbol query", () => {
+    expect(filterTrades(trades, { symbol: "  TCS  " }).map((t) => t.symbol)).toEqual([
+      "TCS",
+    ]);
+  });
+
+  test("symbol filter returns empty when no match", () => {
+    expect(filterTrades(trades, { symbol: "XXX" })).toEqual([]);
   });
 });

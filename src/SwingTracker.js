@@ -25,10 +25,20 @@ import {
   tradeAge,
   computeMetrics,
   aggregateClosed,
+  sortTrades,
+  filterTrades,
 } from "./swingMath";
 
 // Re-export for any external consumers (test files, future imports).
-export { cleanLegs, summarizeLegs, tradeAge, computeMetrics, aggregateClosed };
+export {
+  cleanLegs,
+  summarizeLegs,
+  tradeAge,
+  computeMetrics,
+  aggregateClosed,
+  sortTrades,
+  filterTrades,
+};
 
 const C = {
   bg: "#07090f",
@@ -986,16 +996,84 @@ function TradesTable({
   pageSize = 10,
 }) {
   const [page, setPage] = useState(0);
+  // Sort: tri-state (key + dir). Click cycles asc → desc → cleared.
+  const [sortKey, setSortKey] = useState("");
+  const [sortDir, setSortDir] = useState("");
+  // Filters: substring for symbol, exact match for the dropdowns.
+  const [filters, setFilters] = useState({
+    symbol: "",
+    marketCondition: "",
+    strategy: "",
+    mistake: "",
+  });
 
-  // Reset to page 0 if the trade list shrinks (e.g. user deleted enough to
-  // empty the current page) or if we toggle pagination.
-  const totalPages = paginate ? Math.max(1, Math.ceil(trades.length / pageSize)) : 1;
+  // Augment each trade with derived fields the table renders / sorts on.
+  // Derived sort keys live on `_age`, `_risk`, `_pnl`, `_rMult` so sortTrades
+  // (which indexes by property name) can sort on them just like any other
+  // column. Computed once per trade so sort doesn't re-do the math per swap.
+  const enrichedTrades = useMemo(
+    () =>
+      (trades || []).map((t) => {
+        const risk = Math.max(0, (t.entryPrice - t.stopLoss) * t.qty);
+        const isOpen = t.status?.toLowerCase() === "open";
+        const pnl = isOpen
+          ? t.ltp
+            ? (t.ltp - t.entryPrice) * t.qty
+            : 0
+          : (t.exitPrice - t.entryPrice) * t.qty;
+        const rMult = risk > 0 ? pnl / risk : 0;
+        return {
+          ...t,
+          _age: tradeAge(t),
+          _risk: risk,
+          _pnl: pnl,
+          _rMult: rMult,
+        };
+      }),
+    [trades],
+  );
+
+  const filtered = useMemo(
+    () => filterTrades(enrichedTrades, filters),
+    [enrichedTrades, filters],
+  );
+  const processed = useMemo(
+    () => sortTrades(filtered, sortKey, sortDir),
+    [filtered, sortKey, sortDir],
+  );
+
+  const totalPages = paginate ? Math.max(1, Math.ceil(processed.length / pageSize)) : 1;
   const safePage = Math.min(page, totalPages - 1);
   const visible = paginate
-    ? trades.slice(safePage * pageSize, safePage * pageSize + pageSize)
-    : trades;
+    ? processed.slice(safePage * pageSize, safePage * pageSize + pageSize)
+    : processed;
 
-  if (trades.length === 0) {
+  // Reset to page 0 whenever filtering or sorting changes the result set.
+  useEffect(() => {
+    setPage(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortKey, sortDir, filters.symbol, filters.marketCondition, filters.strategy, filters.mistake]);
+
+  const handleSort = (key) => {
+    if (sortKey !== key) {
+      setSortKey(key);
+      setSortDir("asc");
+    } else if (sortDir === "asc") {
+      setSortDir("desc");
+    } else {
+      // Third click: clear sort (revert to caller's input order, e.g. closedSorted).
+      setSortKey("");
+      setSortDir("");
+    }
+  };
+  const setFilter = (k, v) => setFilters((f) => ({ ...f, [k]: v }));
+  const clearFilters = () =>
+    setFilters({ symbol: "", marketCondition: "", strategy: "", mistake: "" });
+  const anyFilterActive = Boolean(
+    filters.symbol || filters.marketCondition || filters.strategy || filters.mistake,
+  );
+
+  if ((trades || []).length === 0) {
     return (
       <div>
         <SectionTitle>{title}</SectionTitle>
@@ -1016,6 +1094,44 @@ function TradesTable({
     );
   }
 
+  // Sortable header cell: click cycles asc → desc → cleared.
+  const SortTh = ({ label, sortKeyName, align = "left" }) => {
+    const active = sortKey === sortKeyName;
+    const arrow = active ? (sortDir === "asc" ? " ▲" : " ▼") : "";
+    return (
+      <th
+        onClick={() => handleSort(sortKeyName)}
+        style={{
+          padding: "12px 14px",
+          textAlign: align,
+          cursor: "pointer",
+          userSelect: "none",
+          color: active ? C.accent : C.sub,
+          whiteSpace: "nowrap",
+        }}
+        title={
+          active
+            ? `Sorted ${sortDir}. Click to ${sortDir === "asc" ? "reverse" : "clear"}`
+            : "Click to sort"
+        }
+      >
+        {label}
+        {arrow}
+      </th>
+    );
+  };
+
+  const filterInputStyle = {
+    background: C.surface,
+    border: `1px solid ${C.border}`,
+    color: C.text,
+    borderRadius: 6,
+    padding: "6px 8px",
+    fontSize: 12,
+    fontFamily: "'DM Mono', monospace",
+    outline: "none",
+  };
+
   return (
     <div>
       <SectionTitle>{title}</SectionTitle>
@@ -1027,6 +1143,92 @@ function TradesTable({
           overflow: "hidden",
         }}
       >
+        {/* Filter bar — Symbol search + dropdowns. Hidden visually when no
+            trades exist (handled above) but always rendered when trades > 0
+            so the user can find rows even after filtering them all out. */}
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 8,
+            padding: "10px 12px",
+            borderBottom: `1px solid ${C.border}`,
+            background: C.surface,
+          }}
+        >
+          <input
+            type="text"
+            placeholder="Filter by symbol…"
+            value={filters.symbol}
+            onChange={(e) => setFilter("symbol", e.target.value)}
+            style={{ ...filterInputStyle, minWidth: 140, flex: "0 1 180px" }}
+          />
+          <select
+            value={filters.marketCondition}
+            onChange={(e) => setFilter("marketCondition", e.target.value)}
+            style={filterInputStyle}
+          >
+            <option value="">All Market</option>
+            {MARKET_CONDITIONS.map((c) => (
+              <option key={c} value={c}>
+                {c}
+              </option>
+            ))}
+          </select>
+          <select
+            value={filters.strategy}
+            onChange={(e) => setFilter("strategy", e.target.value)}
+            style={filterInputStyle}
+          >
+            <option value="">All Strategies</option>
+            {STRATEGY_OPTIONS.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+          <select
+            value={filters.mistake}
+            onChange={(e) => setFilter("mistake", e.target.value)}
+            style={filterInputStyle}
+          >
+            <option value="">All Mistakes</option>
+            {MISTAKE_OPTIONS.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+          {anyFilterActive && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              style={{
+                ...filterInputStyle,
+                cursor: "pointer",
+                color: C.accent,
+                borderColor: `${C.accent}60`,
+              }}
+              title="Clear all filters"
+            >
+              ✕ Clear
+            </button>
+          )}
+          <div
+            style={{
+              marginLeft: "auto",
+              fontFamily: "'DM Mono', monospace",
+              fontSize: 11,
+              color: C.sub,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {processed.length === enrichedTrades.length
+              ? `${enrichedTrades.length} ${enrichedTrades.length === 1 ? "trade" : "trades"}`
+              : `${processed.length} of ${enrichedTrades.length}`}
+          </div>
+        </div>
         <div style={{ overflowX: "auto" }}>
           <table
             style={{
@@ -1047,19 +1249,34 @@ function TradesTable({
                   textTransform: "uppercase",
                 }}
               >
-                <th style={{ padding: "12px 14px", textAlign: "left" }}>Symbol</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>Entry</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>SL</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>Qty</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>Age</th>
+                <SortTh label="Symbol" sortKeyName="symbol" align="left" />
+                <SortTh label="Entry" sortKeyName="entryPrice" align="right" />
+                <SortTh label="SL" sortKeyName="stopLoss" align="right" />
+                <SortTh label="Qty" sortKeyName="qty" align="right" />
+                <SortTh label="Age" sortKeyName="_age" align="right" />
                 <th style={{ padding: "12px 14px", textAlign: "left" }}>Context</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>Risk</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>P&L</th>
-                <th style={{ padding: "12px 14px", textAlign: "right" }}>R-mult</th>
+                <SortTh label="Risk" sortKeyName="_risk" align="right" />
+                <SortTh label="P&L" sortKeyName="_pnl" align="right" />
+                <SortTh label="R-mult" sortKeyName="_rMult" align="right" />
                 <th style={{ padding: "12px 14px", textAlign: "right" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
+              {visible.length === 0 && (
+                <tr>
+                  <td
+                    colSpan={10}
+                    style={{
+                      padding: "28px 14px",
+                      textAlign: "center",
+                      color: C.muted,
+                      fontSize: 13,
+                    }}
+                  >
+                    No trades match the current filters.
+                  </td>
+                </tr>
+              )}
               {visible.map((t) => {
                 const risk = Math.max(0, (t.entryPrice - t.stopLoss) * t.qty);
                 const riskPct = capital ? (risk / capital) * 100 : 0;
