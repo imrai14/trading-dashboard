@@ -1076,6 +1076,19 @@ function TradesTable({
                         style={{
                           fontFamily: "'DM Mono', monospace",
                           fontSize: 10,
+                          fontWeight: 400,
+                          color: C.sub,
+                          marginTop: 2,
+                          whiteSpace: "nowrap",
+                        }}
+                        title={`Invested: ${t.entryPrice} × ${t.qty}`}
+                      >
+                        {fmtINR(t.entryPrice * t.qty)}
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "'DM Mono', monospace",
+                          fontSize: 10,
                           color: C.muted,
                           marginTop: 2,
                           whiteSpace: "nowrap",

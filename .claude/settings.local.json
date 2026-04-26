@@ -11,7 +11,11 @@
       "Read(//tmp/**)",
       "Bash(curl -s http://localhost:3456/static/js/bundle.js)",
       "Bash(curl -s -o /tmp/b.js -w \"%{http_code} %{size_download}\\\\n\" http://localhost:3456/static/js/bundle.js)",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(awk -F'\\\\t' '{print NR\": \"NF\" fields\"}' /Users/shubham/Documents/workSpace/trading-dashboard/import-trades.tsv)",
+      "Bash(awk -F'\\\\t' 'NR==1 || NR==2 || NR==5 || NR==22 {print \"L\"NR\": [4]=\"$4\" [5]=\"$5\" [6]=\"$6\" [9]=\"$9\" [16]=\"$16\" [17]=\"$17\"|END\"}' /Users/shubham/Documents/workSpace/trading-dashboard/import-trades.tsv)",
+      "Bash(awk '-F\\\\t' ' *)",
+      "Bash(awk '-F\\\\t' 'NR==1 || NR==5 || NR==22 { *)"
     ]
   }
 }
