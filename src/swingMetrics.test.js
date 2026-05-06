@@ -502,14 +502,15 @@ describe("computeMetrics — combined realistic scenario", () => {
   test("portfolio with 2 open + 2 closed across multi-leg states", () => {
     const m = computeMetrics(
       [
-        // Open with partial exit booked
+        // Open with partial exit booked: 100 bought, 30 sold → 70 still open.
+        // Open-side tile math must use the still-open 70, not the original 100.
         open({
           symbol: "AAA",
           entryPrice: 100,
           qty: 100,
           stopLoss: 95,
           ltp: 110,
-          exits: [{ price: 115, qty: 30 }], // realized +450
+          exits: [{ price: 115, qty: 30 }], // realized +450 on the sold 30
         }),
         // Open, no exits, just a runner
         open({
@@ -545,12 +546,13 @@ describe("computeMetrics — combined realistic scenario", () => {
       settings,
     );
 
-    // Open P&L: AAA (110-100)*100 = 1000 + BBB (205-200)*50 = 250 → 1250
-    expect(m.openPnl).toBe(1250);
-    // Capital deployed: AAA 10000 + BBB 10000 = 20000
-    expect(m.capitalDeployed).toBe(20000);
-    // Risk on open: AAA (100-95)*100 = 500 + BBB (200-190)*50 = 500 → 1000
-    expect(m.openRisk).toBe(1000);
+    // Open P&L uses still-open qty:
+    //   AAA (110-100) × 70 = 700  +  BBB (205-200) × 50 = 250  → 950
+    expect(m.openPnl).toBe(950);
+    // Capital deployed: AAA 100×70 = 7000 + BBB 200×50 = 10000 → 17000
+    expect(m.capitalDeployed).toBe(17000);
+    // Risk on open: AAA (100-95)×70 = 350 + BBB (200-190)×50 = 500 → 850
+    expect(m.openRisk).toBe(850);
     // Realized P&L: AAA partial +450 + CCC +1500 + DDD -200 = 1750
     expect(m.realizedPnl).toBe(1750);
     // Win-rate: 1 win (CCC) out of 2 closed = 50%
@@ -561,5 +563,31 @@ describe("computeMetrics — combined realistic scenario", () => {
     // closedSorted newest first
     expect(m.closedSorted[0].symbol).toBe("DDD"); // 2025-02-15
     expect(m.closedSorted[1].symbol).toBe("CCC"); // 2025-02-01
+  });
+
+  // Lockdown for the partial-exit tile bug: every open-side tile must
+  // exclude the already-sold portion of a still-open trade.
+  test("partial exit on Open trade excludes sold qty from openPnl / capitalDeployed / openRisk", () => {
+    const m = computeMetrics(
+      [
+        open({
+          symbol: "DALMIA",
+          entryPrice: 380,
+          qty: 180,
+          stopLoss: 360,
+          ltp: 400,
+          exits: [{ price: 370, qty: 80 }], // 100 still open
+        }),
+      ],
+      { totalCapital: 1_000_000 },
+    );
+    // Open P&L on the 100 still held: (400-380) × 100 = 2000
+    expect(m.openPnl).toBe(2000);
+    // Capital deployed = 380 × 100 = 38000 (NOT 380 × 180 = 68400)
+    expect(m.capitalDeployed).toBe(38000);
+    // Risk on open = (380-360) × 100 = 2000 (NOT × 180)
+    expect(m.openRisk).toBe(2000);
+    // Realized still reflects the 80 sold: (370-380) × 80 = -800
+    expect(m.realizedPnl).toBe(-800);
   });
 });

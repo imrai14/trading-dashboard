@@ -11,6 +11,8 @@ import {
   aggregateClosed,
   sortTrades,
   filterTrades,
+  exitQty,
+  openQty,
 } from "./swingMath";
 
 describe("cleanLegs", () => {
@@ -282,6 +284,85 @@ describe("aggregateClosed", () => {
       { entryPrice: 100, exitPrice: 110, qty: 10, stopLoss: 95 }, // R = 2
     ]);
     expect(out.avgR).toBeCloseTo(2, 5);
+  });
+});
+
+describe("exitQty / openQty", () => {
+  test("exitQty returns 0 for trade with no exits array", () => {
+    expect(exitQty({ qty: 100 })).toBe(0);
+    expect(exitQty({ qty: 100, exits: null })).toBe(0);
+    expect(exitQty({ qty: 100, exits: [] })).toBe(0);
+  });
+
+  test("exitQty sums leg qty across all exit legs", () => {
+    expect(
+      exitQty({
+        qty: 200,
+        exits: [
+          { price: 110, qty: 50 },
+          { price: 120, qty: 30 },
+        ],
+      }),
+    ).toBe(80);
+  });
+
+  test("exitQty coerces numeric strings", () => {
+    expect(exitQty({ qty: 100, exits: [{ qty: "40" }, { qty: "10" }] })).toBe(50);
+  });
+
+  test("exitQty skips malformed legs without crashing", () => {
+    expect(
+      exitQty({
+        exits: [{ qty: 30 }, null, { qty: "abc" }, { qty: 20 }],
+      }),
+    ).toBe(50);
+  });
+
+  test("exitQty handles null/undefined trade input", () => {
+    expect(exitQty(null)).toBe(0);
+    expect(exitQty(undefined)).toBe(0);
+  });
+
+  test("openQty equals total entry qty when nothing is sold yet", () => {
+    expect(openQty({ qty: 180, exits: [] })).toBe(180);
+  });
+
+  test("openQty subtracts the exited portion (partial exit)", () => {
+    // DALMIA-style: 180 bought, 80 sold → 100 still open.
+    expect(
+      openQty({ qty: 180, exits: [{ price: 373.6, qty: 80 }] }),
+    ).toBe(100);
+  });
+
+  test("openQty is 0 for a fully-closed trade (sum of exit qty = entry qty)", () => {
+    expect(
+      openQty({
+        qty: 200,
+        exits: [
+          { price: 110, qty: 100 },
+          { price: 120, qty: 100 },
+        ],
+      }),
+    ).toBe(0);
+  });
+
+  test("openQty clamps to 0 if exits accidentally exceed entry qty (data error)", () => {
+    expect(
+      openQty({ qty: 100, exits: [{ price: 50, qty: 150 }] }),
+    ).toBe(0);
+  });
+
+  test("openQty handles legacy single-leg-synth exit (whole position sold)", () => {
+    // After normalizeTrade, legacy closed rows look like exits=[{qty: legacyQty}]
+    // so openQty falls out to 0 — the synthesized leg matches entry total.
+    expect(
+      openQty({ qty: 50, exits: [{ price: 110, qty: 50 }] }),
+    ).toBe(0);
+  });
+
+  test("openQty handles null/undefined trade gracefully", () => {
+    expect(openQty(null)).toBe(0);
+    expect(openQty(undefined)).toBe(0);
   });
 });
 

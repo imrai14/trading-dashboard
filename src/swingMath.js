@@ -60,17 +60,39 @@ export function resolveCapital(trades, settings) {
   return 0;
 }
 
+// Total qty across exit legs (or 0 if none / malformed).
+// normalizeTrade synthesizes a single leg from legacy flat columns so a
+// fully-closed legacy row already has exits[0].qty == entryQty here.
+export function exitQty(t) {
+  if (!t) return 0;
+  const legs = Array.isArray(t.exits) ? t.exits : [];
+  return legs.reduce((s, l) => s + (Number(l && l.qty) || 0), 0);
+}
+
+// Open (still-held) qty = entry total qty − exited qty, clamped ≥ 0.
+// Used by every "open exposure" calculation: open P&L, capital deployed,
+// risk on open, and the live Qty column for partial-exit Open trades.
+// For fully-closed trades this returns 0 (everything is sold).
+export function openQty(t) {
+  if (!t) return 0;
+  const entryQ = Number(t.qty) || 0;
+  return Math.max(0, entryQ - exitQty(t));
+}
+
 // The big aggregation. Returns every metric the dashboard tiles need.
 export function computeMetrics(trades, settings) {
   const open = trades.filter((t) => t.status?.toLowerCase() === "open");
   const closed = trades.filter((t) => t.status?.toLowerCase() === "closed");
 
+  // Open-side aggregations all use the STILL-OPEN qty (entry total − exited).
+  // The exited portion has already been booked into Realized P&L; if we
+  // multiplied by t.qty here we'd double-count partial exits in the tiles.
   const openPnl = open.reduce(
-    (s, t) => s + (t.ltp ? (t.ltp - t.entryPrice) * t.qty : 0),
+    (s, t) => s + (t.ltp ? (t.ltp - t.entryPrice) * openQty(t) : 0),
     0,
   );
   const capitalDeployed = open.reduce(
-    (s, t) => s + t.entryPrice * t.qty,
+    (s, t) => s + t.entryPrice * openQty(t),
     0,
   );
   const latestCapital = resolveCapital(trades, settings);
@@ -79,7 +101,7 @@ export function computeMetrics(trades, settings) {
     : 0;
 
   const openRisk = open.reduce(
-    (s, t) => s + Math.max(0, (t.entryPrice - t.stopLoss) * t.qty),
+    (s, t) => s + Math.max(0, (t.entryPrice - t.stopLoss) * openQty(t)),
     0,
   );
   const avgRiskPct = latestCapital ? (openRisk / latestCapital) * 100 : 0;

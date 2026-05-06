@@ -27,6 +27,8 @@ import {
   aggregateClosed,
   sortTrades,
   filterTrades,
+  exitQty,
+  openQty,
 } from "./swingMath";
 
 // Re-export for any external consumers (test files, future imports).
@@ -38,6 +40,8 @@ export {
   aggregateClosed,
   sortTrades,
   filterTrades,
+  exitQty,
+  openQty,
 };
 
 const C = {
@@ -62,10 +66,19 @@ const fmtINR = (n) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: "INR",
-    maximumFractionDigits: 0,
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(n || 0);
 
 const fmtPct = (n) => `${(n || 0).toFixed(2)}%`;
+
+// Plain-number price display, always 2 decimals so legacy 4-decimal-saved
+// prices read consistently with the new 2-decimal-saved ones.
+const fmtPrice = (n) => {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v === 0) return "—";
+  return v.toFixed(2);
+};
 
 const MAX_LEGS = 3;
 
@@ -1008,22 +1021,33 @@ function TradesTable({
   });
 
   // Augment each trade with derived fields the table renders / sorts on.
-  // Derived sort keys live on `_age`, `_risk`, `_pnl`, `_rMult` so sortTrades
-  // (which indexes by property name) can sort on them just like any other
-  // column. Computed once per trade so sort doesn't re-do the math per swap.
+  // Derived sort keys live on `_age`, `_risk`, `_pnl`, `_rMult`, `_qty` so
+  // sortTrades (which indexes by property name) can sort on them just like
+  // any other column. Computed once per trade so sort doesn't re-do the
+  // math per swap.
+  //
+  // For Open trades the row shows the still-open qty (entry - exited) so a
+  // partial exit visibly reduces the position. Risk / P&L / R-mult use the
+  // same open qty so the row's metrics reflect what's actually still on the
+  // table — the booked-cash portion lives in the Realized P&L tile.
   const enrichedTrades = useMemo(
     () =>
       (trades || []).map((t) => {
-        const risk = Math.max(0, (t.entryPrice - t.stopLoss) * t.qty);
         const isOpen = t.status?.toLowerCase() === "open";
+        const sold = exitQty(t);
+        const liveQty = isOpen ? openQty(t) : Number(t.qty) || 0;
+        const risk = Math.max(0, (t.entryPrice - t.stopLoss) * liveQty);
         const pnl = isOpen
           ? t.ltp
-            ? (t.ltp - t.entryPrice) * t.qty
+            ? (t.ltp - t.entryPrice) * liveQty
             : 0
-          : (t.exitPrice - t.entryPrice) * t.qty;
+          : (t.exitPrice - t.entryPrice) * liveQty;
         const rMult = risk > 0 ? pnl / risk : 0;
         return {
           ...t,
+          _qty: liveQty,
+          _entryQty: Number(t.qty) || 0,
+          _soldQty: sold,
           _age: tradeAge(t),
           _risk: risk,
           _pnl: pnl,
@@ -1252,7 +1276,7 @@ function TradesTable({
                 <SortTh label="Symbol" sortKeyName="symbol" align="left" />
                 <SortTh label="Entry" sortKeyName="entryPrice" align="right" />
                 <SortTh label="SL" sortKeyName="stopLoss" align="right" />
-                <SortTh label="Qty" sortKeyName="qty" align="right" />
+                <SortTh label="Qty" sortKeyName="_qty" align="right" />
                 <SortTh label="Age" sortKeyName="_age" align="right" />
                 <th style={{ padding: "12px 14px", textAlign: "left" }}>Context</th>
                 <SortTh label="Risk" sortKeyName="_risk" align="right" />
@@ -1278,20 +1302,13 @@ function TradesTable({
                 </tr>
               )}
               {visible.map((t) => {
-                const risk = Math.max(0, (t.entryPrice - t.stopLoss) * t.qty);
+                // Use the derived fields populated in `enrichedTrades` —
+                // for Open trades these correctly reflect openQty (excluding
+                // the already-sold portion of partial exits).
+                const risk = t._risk;
+                const pnl = t._pnl;
+                const rMult = t._rMult;
                 const riskPct = capital ? (risk / capital) * 100 : 0;
-                const isOpen = t.status?.toLowerCase() === "open";
-                const pnl = isOpen
-                  ? t.ltp
-                    ? (t.ltp - t.entryPrice) * t.qty
-                    : 0
-                  : (t.exitPrice - t.entryPrice) * t.qty;
-                const rMult =
-                  risk > 0
-                    ? (isOpen
-                        ? (t.ltp - t.entryPrice) * t.qty
-                        : (t.exitPrice - t.entryPrice) * t.qty) / risk
-                    : 0;
                 return (
                   <tr
                     key={t._row}
@@ -1315,9 +1332,14 @@ function TradesTable({
                           marginTop: 2,
                           whiteSpace: "nowrap",
                         }}
-                        title={`Invested: ${t.entryPrice} × ${t.qty}`}
+                        title={
+                          t._soldQty > 0
+                            ? `Currently invested: ${fmtPrice(t.entryPrice)} × ${t._qty}\n` +
+                              `Original buy: ${fmtPrice(t.entryPrice)} × ${t._entryQty}`
+                            : `Invested: ${fmtPrice(t.entryPrice)} × ${t._qty}`
+                        }
                       >
-                        {fmtINR(t.entryPrice * t.qty)}
+                        {fmtINR(t.entryPrice * t._qty)}
                       </div>
                       <div
                         style={{
@@ -1358,7 +1380,7 @@ function TradesTable({
                           : undefined
                       }
                     >
-                      {t.entryPrice}
+                      {fmtPrice(t.entryPrice)}
                       {(t.entries || []).length > 1 && (
                         <div style={{ fontSize: 10, color: C.sub }}>
                           avg · {t.entries.length} legs
@@ -1373,7 +1395,7 @@ function TradesTable({
                         color: C.red,
                       }}
                     >
-                      {t.stopLoss}
+                      {fmtPrice(t.stopLoss)}
                     </td>
                     <td
                       style={{
@@ -1381,8 +1403,27 @@ function TradesTable({
                         textAlign: "right",
                         fontFamily: "'DM Mono', monospace",
                       }}
+                      title={
+                        t._soldQty > 0
+                          ? `${t._soldQty} of ${t._entryQty} sold · ${t._qty} still open`
+                          : undefined
+                      }
                     >
-                      {t.qty}
+                      {t._qty}
+                      {t._soldQty > 0 && t._qty > 0 && (
+                        // Partial-exit Open trade: show how much was sold so the
+                        // original buy size isn't lost from the table view.
+                        <div
+                          style={{
+                            fontSize: 10,
+                            color: C.sub,
+                            fontWeight: 400,
+                            marginTop: 2,
+                          }}
+                        >
+                          {t._soldQty} of {t._entryQty} sold
+                        </div>
+                      )}
                     </td>
                     <td
                       style={{
@@ -1855,9 +1896,9 @@ export default function SwingTracker() {
       chartLink: form.chartLink || "",
       mistakes: form.mistakes || "",
       // Derived summary fields (kept in the legacy columns for readability).
-      entryPrice: Number(entrySummary.avg.toFixed(4)),
+      entryPrice: Number(entrySummary.avg.toFixed(2)),
       qty: entrySummary.totalQty,
-      exitPrice: Number(exitSummary.avg.toFixed(4)),
+      exitPrice: Number(exitSummary.avg.toFixed(2)),
       exitDate: exitSummary.lastDate,
       // Canonical leg data.
       entries: entryLegs.length ? JSON.stringify(entryLegs) : "",
