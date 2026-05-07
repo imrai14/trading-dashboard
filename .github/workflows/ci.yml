@@ -1,0 +1,51 @@
+# GitHub Actions CI for TradeScope.
+# Runs on every push to `main` and on every pull request targeting `main`.
+# Posts a green/red status check next to each commit and PR — when the
+# job fails, GitHub blocks merging if the branch protection rule
+# "Require status checks to pass" is enabled (Settings → Branches).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same branch when a new commit is pushed,
+# so a quick succession of pushes doesn't pile up redundant work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          # Caches ~/.npm so subsequent runs skip the slow registry fetch.
+          cache: 'npm'
+
+      - name: Install dependencies (clean, lockfile-strict)
+        run: npm ci
+
+      # `npm test` in CRA defaults to interactive watch mode; CI=true +
+      # --watchAll=false force a single run that exits with a non-zero
+      # code on any failure, which fails this job and the commit/PR check.
+      - name: Run unit + component tests
+        run: CI=true npm test -- --watchAll=false
+
+      # Production webpack build — catches issues Jest can't (missing
+      # imports, JSX errors in router-coupled files, broken bundling)
+      # before they hit a deploy.
+      - name: Production build
+        run: CI=true npm run build

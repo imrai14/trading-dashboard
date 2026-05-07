@@ -1,0 +1,10 @@
+# Pre-commit hook — fires before every `git commit` in this repo.
+# Blocks the commit if Jest reports any test failure, so broken code
+# can't land on a branch even by accident.
+#
+# Bypass (rare, intentional cases): `git commit --no-verify`
+# Disable for everyone: delete this file (or remove the prepare script
+# from package.json so husky stops installing hooks on `npm install`).
+
+echo "→ pre-commit: running test suite (CI mode, non-interactive)"
+CI=true npm test --silent -- --watchAll=false
