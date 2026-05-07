@@ -79,6 +79,87 @@ export function openQty(t) {
   return Math.max(0, entryQ - exitQty(t));
 }
 
+// Booked P&L on a trade — leg-aware sum when exit-leg JSON exists, else
+// the legacy `(exitPrice − entry) × qty` formula for old rows that pre-date
+// leg JSON. Returns 0 when neither path can produce a number (e.g. an Open
+// trade with no exits booked yet).
+//
+// Used by:
+//   - computeMetrics realized-P&L loop
+//   - computeMetrics R-multiples (reward numerator)
+//   - aggregateClosed (per-symbol breakdown reward + win count)
+//   - TradesTable Closed-row P&L
+//
+// IMPORTANT: For partial-closed trades marked "Closed" with exits.qty <
+// entries.qty, leg-aware sum is what makes this CORRECT — the legacy
+// flat formula would multiply by entry total and over-count.
+export function realizedPnl(t) {
+  if (!t) return 0;
+  const legs = Array.isArray(t.exits) ? t.exits : [];
+  const entry = Number(t.entryPrice) || 0;
+  if (legs.length > 0) {
+    // Match cleanLegs' contract: skip null legs and any leg whose price
+    // or qty isn't a positive finite number. Without this guard, a leg
+    // with `price: "abc"` would coerce to 0 and silently subtract the
+    // full entry cost from realized P&L.
+    return legs.reduce((s, l) => {
+      if (!l) return s;
+      const p = Number(l.price);
+      const q = Number(l.qty);
+      if (!Number.isFinite(p) || !Number.isFinite(q) || p <= 0 || q <= 0) {
+        return s;
+      }
+      return s + (p - entry) * q;
+    }, 0);
+  }
+  const exitP = Number(t.exitPrice) || 0;
+  const qty = Number(t.qty) || 0;
+  if (exitP > 0 && qty > 0) {
+    return (exitP - entry) * qty;
+  }
+  return 0;
+}
+
+// Validate trade-form leg dates. Returns null when valid, else a short
+// human-readable error string. Pure function so it's unit-testable.
+//
+// Rules enforced:
+//   1. No leg date may be later than today (future trades aren't real).
+//   2. No exit leg date may be earlier than the earliest entry leg date
+//      (you can't sell what you haven't bought).
+//
+// `options.today` lets tests pin the clock; defaults to today's ISO date.
+export function validateTradeDates(form, options = {}) {
+  if (!form) return null;
+  const today =
+    options.today || new Date().toISOString().slice(0, 10);
+  const entryLegs = (form.entries || []).filter((l) => l && l.date);
+  const exitLegs = (form.exits || []).filter((l) => l && l.date);
+
+  for (const l of entryLegs) {
+    if (l.date > today) {
+      return `Entry leg date can't be in the future: ${l.date}`;
+    }
+  }
+  for (const l of exitLegs) {
+    if (l.date > today) {
+      return `Exit leg date can't be in the future: ${l.date}`;
+    }
+  }
+  if (entryLegs.length > 0 && exitLegs.length > 0) {
+    const earliestEntry = entryLegs.reduce(
+      (acc, l) => (l.date < acc ? l.date : acc),
+      entryLegs[0].date,
+    );
+    for (const l of exitLegs) {
+      if (l.date < earliestEntry) {
+        return `Exit leg date (${l.date}) is earlier than the earliest entry date (${earliestEntry}).`;
+      }
+    }
+  }
+  return null;
+}
+
 // The big aggregation. Returns every metric the dashboard tiles need.
 export function computeMetrics(trades, settings) {
   const open = trades.filter((t) => t.status?.toLowerCase() === "open");
@@ -106,14 +187,18 @@ export function computeMetrics(trades, settings) {
   );
   const avgRiskPct = latestCapital ? (openRisk / latestCapital) * 100 : 0;
 
+  // R-multiple per closed trade. Risk denominator uses entry total qty
+  // (the position size you committed to when you accepted the SL); reward
+  // numerator is leg-aware booked P&L so partial-marked-Closed trades
+  // can't fake an inflated R by multiplying by entry qty they never sold.
   const rMultiples = closed
     .map((t) => {
-      const risk = (t.entryPrice - t.stopLoss) * t.qty;
-      const reward = (t.exitPrice - t.entryPrice) * t.qty;
+      const risk = (t.entryPrice - t.stopLoss) * (Number(t.qty) || 0);
+      const reward = realizedPnl(t);
       if (!risk) return null;
       return reward / risk;
     })
-    .filter((v) => v !== null && isFinite(v));
+    .filter((v) => v !== null && Number.isFinite(v));
 
   const avgR =
     rMultiples.length > 0
@@ -123,38 +208,18 @@ export function computeMetrics(trades, settings) {
   // Realized P&L: profit/loss BOOKED, i.e. cash actually taken off the table.
   // Counts every exit leg across ALL trades (open + closed) — partial exits
   // on a still-open position are real money in your pocket and must show up.
-  // Each leg realizes (legPrice - entryAvg) × legQty. For legacy rows that
-  // pre-date leg JSON we fall back to (exit - entry) × qty when status is
-  // Closed (open legacy rows have no exit info to count).
-  // Win-rate is still computed over fully-closed trades only — a partially
-  // exited open trade hasn't resolved yet, so it doesn't count as a win/loss.
-  let realizedPnl = 0;
+  // Win-rate is computed over fully-closed trades only — a partially exited
+  // open trade hasn't resolved yet, so it doesn't count as a win/loss.
+  let realized = 0;
   let wins = 0;
   let grossProfit = 0;
   let grossLoss = 0;
   for (const t of trades) {
-    const exitLegs = Array.isArray(t.exits) ? t.exits : [];
-    let pnl = 0;
-    if (exitLegs.length > 0) {
-      pnl = exitLegs.reduce(
-        (s, l) => s + (l.price - t.entryPrice) * l.qty,
-        0,
-      );
-    } else if (t.status?.toLowerCase() === "closed" && t.exitPrice > 0) {
-      // Legacy closed row without leg JSON.
-      pnl = (t.exitPrice - t.entryPrice) * t.qty;
-    } else {
-      continue; // open trade with no exits booked yet
-    }
-    realizedPnl += pnl;
+    realized += realizedPnl(t);
   }
   for (const t of closed) {
-    // Win/loss attribution is per closed trade.
-    const exitLegs = Array.isArray(t.exits) ? t.exits : [];
-    const pnl =
-      exitLegs.length > 0
-        ? exitLegs.reduce((s, l) => s + (l.price - t.entryPrice) * l.qty, 0)
-        : (t.exitPrice - t.entryPrice) * t.qty;
+    // Win/loss attribution is per closed trade — same leg-aware rule.
+    const pnl = realizedPnl(t);
     if (pnl > 0) {
       wins++;
       grossProfit += pnl;
@@ -183,7 +248,7 @@ export function computeMetrics(trades, settings) {
     openRisk,
     avgRiskPct,
     avgR,
-    realizedPnl,
+    realizedPnl: realized,
     winRate,
     wins,
     grossProfit,
@@ -264,17 +329,26 @@ export function filterTrades(trades, filters) {
 
 // Compute count / win-rate / avg-R over an array of closed trades.
 // Used by the per-symbol breakdown tables.
+//
+// Reward is leg-aware via realizedPnl(): for a fully-closed multi-leg
+// trade this matches (exitPrice − entry) × qty, but for a partial-closed
+// trade marked Closed (exits.qty < entries.qty) it correctly uses the
+// summed leg P&L instead of the over-counting flat formula.
+//
+// Risk denominator stays on entry total qty — the position size you
+// committed to when you accepted the stop loss.
 export function aggregateClosed(trades) {
-  const n = trades.length;
+  const list = Array.isArray(trades) ? trades : [];
+  const n = list.length;
   if (n === 0) return { n: 0, winRate: 0, avgR: 0 };
   let wins = 0;
   let rSum = 0;
   let rCount = 0;
-  for (const t of trades) {
-    const risk = (t.entryPrice - t.stopLoss) * t.qty;
-    const reward = (t.exitPrice - t.entryPrice) * t.qty;
+  for (const t of list) {
+    const risk = (Number(t.entryPrice) - Number(t.stopLoss)) * (Number(t.qty) || 0);
+    const reward = realizedPnl(t);
     if (reward > 0) wins++;
-    if (risk > 0 && isFinite(reward / risk)) {
+    if (risk > 0 && Number.isFinite(reward / risk)) {
       rSum += reward / risk;
       rCount++;
     }

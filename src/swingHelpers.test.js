@@ -13,6 +13,8 @@ import {
   filterTrades,
   exitQty,
   openQty,
+  realizedPnl,
+  validateTradeDates,
 } from "./swingMath";
 
 describe("cleanLegs", () => {
@@ -547,5 +549,293 @@ describe("filterTrades", () => {
 
   test("symbol filter returns empty when no match", () => {
     expect(filterTrades(trades, { symbol: "XXX" })).toEqual([]);
+  });
+});
+
+describe("realizedPnl", () => {
+  test("returns 0 for null/undefined trade", () => {
+    expect(realizedPnl(null)).toBe(0);
+    expect(realizedPnl(undefined)).toBe(0);
+  });
+
+  test("returns 0 for an Open trade with no exits booked", () => {
+    expect(
+      realizedPnl({ status: "Open", entryPrice: 100, qty: 50, exits: [] }),
+    ).toBe(0);
+  });
+
+  test("leg-aware sum when exit-leg JSON is present (multi-leg full close)", () => {
+    // entry avg 55, exits 70×150 + 80×50 → (70-55)*150 + (80-55)*50 = 2250+1250 = 3500
+    expect(
+      realizedPnl({
+        entryPrice: 55,
+        qty: 200,
+        exits: [
+          { price: 70, qty: 150 },
+          { price: 80, qty: 50 },
+        ],
+      }),
+    ).toBe(3500);
+  });
+
+  test("leg-aware sum when partial exit on still-Open trade", () => {
+    // 200 bought @ 100, sold 50 @ 120 → realized 1000 (only the 50 sold count)
+    expect(
+      realizedPnl({
+        status: "Open",
+        entryPrice: 100,
+        qty: 200,
+        exits: [{ price: 120, qty: 50 }],
+      }),
+    ).toBe(1000);
+  });
+
+  test("PARTIAL-MARKED-CLOSED uses leg sum, NOT (exit-entry)*qty", () => {
+    // The bug being fixed. entry 50, qty 200, sold only 100 @ 70 then marked Closed.
+    // Old (buggy) formula: (70-50)*200 = 4000. Correct: (70-50)*100 = 2000.
+    expect(
+      realizedPnl({
+        status: "Closed",
+        entryPrice: 50,
+        qty: 200,
+        exitPrice: 70,
+        exits: [{ price: 70, qty: 100 }],
+      }),
+    ).toBe(2000);
+  });
+
+  test("legacy closed row (no leg JSON) falls back to (exitPrice − entry) × qty", () => {
+    expect(
+      realizedPnl({
+        status: "Closed",
+        entryPrice: 100,
+        qty: 50,
+        exitPrice: 110,
+        exits: [],
+      }),
+    ).toBe(500);
+  });
+
+  test("returns 0 when neither leg JSON nor a positive legacy exitPrice exists", () => {
+    expect(
+      realizedPnl({ status: "Closed", entryPrice: 100, qty: 50, exits: [] }),
+    ).toBe(0);
+  });
+
+  test("supports negative realized P&L (booked loss)", () => {
+    expect(
+      realizedPnl({
+        entryPrice: 100,
+        qty: 50,
+        exits: [{ price: 80, qty: 50 }],
+      }),
+    ).toBe(-1000);
+  });
+
+  test("coerces numeric strings in legs", () => {
+    expect(
+      realizedPnl({
+        entryPrice: 100,
+        qty: 10,
+        exits: [{ price: "110", qty: "10" }],
+      }),
+    ).toBe(100);
+  });
+
+  test("skips malformed legs without crashing", () => {
+    // null leg + non-numeric values are tolerated.
+    expect(
+      realizedPnl({
+        entryPrice: 100,
+        qty: 30,
+        exits: [
+          { price: 110, qty: 10 }, // +100
+          null,
+          { price: "abc", qty: 10 }, // 0 (non-numeric)
+          { price: 120, qty: 10 }, // +200
+        ],
+      }),
+    ).toBe(300);
+  });
+});
+
+describe("aggregateClosed — leg-aware reward", () => {
+  // Targets the Bug #3 fix: avgR / wins use leg-aware booked P&L instead
+  // of the over-counting (exitPrice − entry) × qty flat formula.
+
+  test("partial-marked-Closed trade: avgR uses leg sum / risk(entryQty), not flat", () => {
+    // Entry 100 × 200 (risk = 5*200 = 1000). Sold only 100 @ 110.
+    // Reward (correct) = (110-100)*100 = 1000. R = 1000/1000 = 1.
+    // Old (buggy) would compute reward (110-100)*200 = 2000 → R = 2.
+    const out = aggregateClosed([
+      {
+        entryPrice: 100,
+        qty: 200,
+        stopLoss: 95,
+        exitPrice: 110,
+        exits: [{ price: 110, qty: 100 }],
+      },
+    ]);
+    expect(out.avgR).toBeCloseTo(1, 5);
+  });
+
+  test("partial-marked-Closed loss: counted as loss, not win", () => {
+    // 200 bought, sold only 100 @ 95. Realized = (95-100)*100 = -500 (loss).
+    // Old buggy: (95-100)*200 = -1000 → still a loss but value wrong.
+    const out = aggregateClosed([
+      {
+        entryPrice: 100,
+        qty: 200,
+        stopLoss: 95,
+        exitPrice: 95,
+        exits: [{ price: 95, qty: 100 }],
+      },
+    ]);
+    expect(out.n).toBe(1);
+    expect(out.winRate).toBe(0);
+  });
+
+  test("multi-leg fully-closed trade: leg sum equals (exit-entry) × qty", () => {
+    // entry 50, qty 100, exits sum to 100, weighted-avg exit = 65 → reward 1500
+    // risk = (50-45)*100 = 500 → R = 3
+    const out = aggregateClosed([
+      {
+        entryPrice: 50,
+        qty: 100,
+        stopLoss: 45,
+        exits: [
+          { price: 60, qty: 50 }, // +500
+          { price: 70, qty: 50 }, // +1000
+        ],
+      },
+    ]);
+    expect(out.n).toBe(1);
+    expect(out.winRate).toBe(100);
+    expect(out.avgR).toBeCloseTo(3, 5);
+  });
+
+  test("non-array input returns the zero stats shape", () => {
+    expect(aggregateClosed(null)).toEqual({ n: 0, winRate: 0, avgR: 0 });
+    expect(aggregateClosed(undefined)).toEqual({ n: 0, winRate: 0, avgR: 0 });
+  });
+});
+
+describe("validateTradeDates", () => {
+  // Tests pin "today" so they're deterministic regardless of when run.
+  const today = "2025-06-15";
+
+  test("returns null for an empty form", () => {
+    expect(validateTradeDates({}, { today })).toBeNull();
+    expect(validateTradeDates(null, { today })).toBeNull();
+  });
+
+  test("returns null when all leg dates are valid", () => {
+    expect(
+      validateTradeDates(
+        {
+          entries: [{ price: 100, qty: 10, date: "2025-06-10" }],
+          exits: [{ price: 110, qty: 10, date: "2025-06-12" }],
+        },
+        { today },
+      ),
+    ).toBeNull();
+  });
+
+  test("flags a future entry leg date", () => {
+    const err = validateTradeDates(
+      {
+        entries: [{ price: 100, qty: 10, date: "2025-12-31" }],
+        exits: [],
+      },
+      { today },
+    );
+    expect(err).toMatch(/future/i);
+    expect(err).toContain("2025-12-31");
+  });
+
+  test("flags a future exit leg date", () => {
+    const err = validateTradeDates(
+      {
+        entries: [{ price: 100, qty: 10, date: "2025-06-01" }],
+        exits: [{ price: 110, qty: 10, date: "2025-12-31" }],
+      },
+      { today },
+    );
+    expect(err).toMatch(/future/i);
+  });
+
+  test("flags an exit date earlier than the earliest entry date", () => {
+    const err = validateTradeDates(
+      {
+        entries: [
+          { price: 100, qty: 10, date: "2025-06-01" },
+          { price: 105, qty: 10, date: "2025-06-05" },
+        ],
+        exits: [{ price: 110, qty: 10, date: "2025-05-20" }],
+      },
+      { today },
+    );
+    expect(err).toMatch(/earlier/i);
+    expect(err).toContain("2025-05-20");
+    expect(err).toContain("2025-06-01");
+  });
+
+  test("ignores legs with empty date fields", () => {
+    expect(
+      validateTradeDates(
+        {
+          entries: [{ price: 100, qty: 10, date: "" }],
+          exits: [{ price: 110, qty: 10, date: "" }],
+        },
+        { today },
+      ),
+    ).toBeNull();
+  });
+
+  test("allows same-day exit (sold the day you bought)", () => {
+    expect(
+      validateTradeDates(
+        {
+          entries: [{ price: 100, qty: 10, date: "2025-06-10" }],
+          exits: [{ price: 110, qty: 10, date: "2025-06-10" }],
+        },
+        { today },
+      ),
+    ).toBeNull();
+  });
+
+  test("allows today's date (boundary case)", () => {
+    expect(
+      validateTradeDates(
+        {
+          entries: [{ price: 100, qty: 10, date: today }],
+          exits: [],
+        },
+        { today },
+      ),
+    ).toBeNull();
+  });
+
+  test("ignores null legs without crashing", () => {
+    expect(
+      validateTradeDates(
+        {
+          entries: [null, { price: 100, qty: 10, date: "2025-06-10" }],
+          exits: [null],
+        },
+        { today },
+      ),
+    ).toBeNull();
+  });
+
+  test("uses real clock when no override provided (smoke test)", () => {
+    // Just confirm the default-today path doesn't crash. Pick a date in the
+    // past so it must validate as OK regardless of when the test runs.
+    expect(
+      validateTradeDates({
+        entries: [{ price: 100, qty: 10, date: "2020-01-01" }],
+        exits: [],
+      }),
+    ).toBeNull();
   });
 });

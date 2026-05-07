@@ -29,6 +29,8 @@ import {
   filterTrades,
   exitQty,
   openQty,
+  realizedPnl,
+  validateTradeDates,
 } from "./swingMath";
 
 // Re-export for any external consumers (test files, future imports).
@@ -42,6 +44,8 @@ export {
   filterTrades,
   exitQty,
   openQty,
+  realizedPnl,
+  validateTradeDates,
 };
 
 const C = {
@@ -751,6 +755,12 @@ function TradeForm({ initial, onSubmit, onCancel, settings }) {
       alert("Total exit qty can't exceed total entry qty.");
       return;
     }
+    // Date sanity: no future dates, no exit dated before any entry.
+    const dateError = validateTradeDates(form);
+    if (dateError) {
+      alert(dateError);
+      return;
+    }
     if (
       form.status?.toLowerCase() === "closed" &&
       exitSummary.totalQty !== entrySummary.totalQty
@@ -1036,12 +1046,18 @@ function TradesTable({
         const isOpen = t.status?.toLowerCase() === "open";
         const sold = exitQty(t);
         const liveQty = isOpen ? openQty(t) : Number(t.qty) || 0;
+        // Risk shown on the row uses live (still-open) qty for Open trades
+        // and total entry qty for Closed (= the position size that was at
+        // risk when the SL was set — drives R-mult denominator).
         const risk = Math.max(0, (t.entryPrice - t.stopLoss) * liveQty);
+        // P&L is unrealized for Open (LTP-based on still-open qty), and
+        // leg-aware booked for Closed via realizedPnl(t) so partial-marked-
+        // Closed rows reflect what was actually sold, not entry total qty.
         const pnl = isOpen
           ? t.ltp
             ? (t.ltp - t.entryPrice) * liveQty
             : 0
-          : (t.exitPrice - t.entryPrice) * liveQty;
+          : realizedPnl(t);
         const rMult = risk > 0 ? pnl / risk : 0;
         return {
           ...t,
