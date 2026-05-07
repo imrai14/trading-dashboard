@@ -46,17 +46,7 @@ import {
   assessRisk,
   equityCurve,
 } from "./swingMath";
-import {
-  C,
-  fmtINR,
-  fmtPct,
-  fmtPrice,
-  SectionTitle,
-  iconBtn,
-  IconCheck,
-  IconPencil,
-  IconTrash,
-} from "./ui";
+import { C, fmtINR, fmtPct, SectionTitle } from "./ui";
 import TradesTable from "./TradesTable";
 
 // Re-export for any external consumers (test files, future imports).
