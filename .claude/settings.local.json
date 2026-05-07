@@ -15,7 +15,10 @@
       "Bash(awk -F'\\\\t' '{print NR\": \"NF\" fields\"}' /Users/shubham/Documents/workSpace/trading-dashboard/import-trades.tsv)",
       "Bash(awk -F'\\\\t' 'NR==1 || NR==2 || NR==5 || NR==22 {print \"L\"NR\": [4]=\"$4\" [5]=\"$5\" [6]=\"$6\" [9]=\"$9\" [16]=\"$16\" [17]=\"$17\"|END\"}' /Users/shubham/Documents/workSpace/trading-dashboard/import-trades.tsv)",
       "Bash(awk '-F\\\\t' ' *)",
-      "Bash(awk '-F\\\\t' 'NR==1 || NR==5 || NR==22 { *)"
+      "Bash(awk '-F\\\\t' 'NR==1 || NR==5 || NR==22 { *)",
+      "Bash(awk '/^function TradesTable\\\\\\(/,/^function BreakdownTable\\\\\\(/' /Users/shubham/Documents/workSpace/trading-dashboard/src/SwingTracker.js)",
+      "Bash(sed -n '965,1674p' /Users/shubham/Documents/workSpace/trading-dashboard/src/SwingTracker.js > /tmp/trades_table_body.txt && wc -l /tmp/trades_table_body.txt && tail -3 /tmp/trades_table_body.txt)",
+      "Bash(grep -n \"assessRisk\\(m\\)\\\\|m\\\\.openRisk\\\\|StatCard\\\\s*$\\\\|label=\\\\\"Risk on Open\\\\\"\\\\|RISK_MULTIPLIERS\\\\|RISK_THRESHOLDS\" /Users/shubham/Documents/workSpace/trading-dashboard/src/SwingTracker.js)"
     ]
   }
 }

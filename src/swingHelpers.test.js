@@ -15,6 +15,10 @@ import {
   openQty,
   realizedPnl,
   validateTradeDates,
+  assessRisk,
+  RISK_THRESHOLDS,
+  RISK_MULTIPLIERS,
+  equityCurve,
 } from "./swingMath";
 
 describe("cleanLegs", () => {
@@ -837,5 +841,399 @@ describe("validateTradeDates", () => {
         exits: [],
       }),
     ).toBeNull();
+  });
+});
+
+describe("assessRisk — fallback thresholds (no per-trade target set)", () => {
+  const cap = 1_000_000;
+  const noTarget = { totalCapital: cap, riskPerTradePct: 0 };
+
+  test("returns ok+null when capital is missing or zero", () => {
+    expect(assessRisk(null, noTarget)).toMatchObject({
+      level: "ok",
+      message: null,
+    });
+    expect(
+      assessRisk({ latestCapital: 0, avgRiskPct: 99 }, noTarget),
+    ).toMatchObject({ level: "ok", message: null });
+    expect(assessRisk({ avgRiskPct: 99 }, noTarget)).toMatchObject({
+      level: "ok",
+      message: null,
+    });
+  });
+
+  test("returns ok+null when avgRiskPct is below the warn threshold", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: RISK_THRESHOLDS.warn - 0.01,
+        openRisk: 19000,
+        open: [{}, {}],
+      },
+      noTarget,
+    );
+    expect(out.level).toBe("ok");
+    expect(out.message).toBeNull();
+  });
+
+  test("returns warn at the fallback warn threshold (2%)", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: RISK_THRESHOLDS.warn,
+        openRisk: 20000,
+        open: [{}, {}],
+      },
+      noTarget,
+    );
+    expect(out.level).toBe("warn");
+    expect(out.message).toMatch(/comfort threshold/i);
+    expect(out.message).toContain("2.00%");
+    expect(out.warnAt).toBe(RISK_THRESHOLDS.warn);
+    expect(out.dangerAt).toBe(RISK_THRESHOLDS.danger);
+  });
+
+  test("returns danger at the fallback danger threshold (5%)", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: RISK_THRESHOLDS.danger,
+        openRisk: 50000,
+        open: [{}, {}, {}],
+      },
+      noTarget,
+    );
+    expect(out.level).toBe("danger");
+    expect(out.message).toMatch(/danger line/i);
+    expect(out.message).toMatch(/trim/i);
+    expect(out.message).toContain("3 trades");
+  });
+
+  test("singular 'trade' when openCount === 1", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: 12.5,
+        openRisk: 125000,
+        open: [{}],
+      },
+      noTarget,
+    );
+    expect(out.message).toContain("1 trade");
+    expect(out.message).not.toContain("1 trades");
+  });
+
+  test("rounds INR figure for readability", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: 2.5,
+        openRisk: 25437.86,
+        open: [{}],
+      },
+      noTarget,
+    );
+    expect(out.message).toContain("25,438");
+  });
+
+  test("undefined settings argument behaves like no-target fallback", () => {
+    // Backwards-compat: callers that haven't been updated yet still work.
+    const out = assessRisk({
+      latestCapital: cap,
+      avgRiskPct: 3.0,
+      openRisk: 30000,
+      open: [{}],
+    });
+    expect(out.warnAt).toBe(RISK_THRESHOLDS.warn);
+    expect(out.dangerAt).toBe(RISK_THRESHOLDS.danger);
+    expect(out.level).toBe("warn");
+  });
+});
+
+describe("assessRisk — target-scaled thresholds (Risk % set in Settings)", () => {
+  const cap = 1_000_000;
+
+  test("with target=1%, warn fires at 3% and danger at 6%", () => {
+    const settings = { totalCapital: cap, riskPerTradePct: 1 };
+    // Below warn
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 2.99, openRisk: 29900, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("ok");
+    // At warn (3%)
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 3, openRisk: 30000, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("warn");
+    // Between warn and danger
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 4.5, openRisk: 45000, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("warn");
+    // At danger (6%)
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 6, openRisk: 60000, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("danger");
+  });
+
+  test("with target=2%, warn fires at 6% and danger at 12%", () => {
+    const settings = { totalCapital: cap, riskPerTradePct: 2 };
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 5.99, openRisk: 59900, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("ok");
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 6, openRisk: 60000, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("warn");
+    expect(
+      assessRisk(
+        { latestCapital: cap, avgRiskPct: 12, openRisk: 120000, open: [{}] },
+        settings,
+      ).level,
+    ).toBe("danger");
+  });
+
+  test("returned warnAt / dangerAt reflect the scaled values", () => {
+    const out = assessRisk(
+      { latestCapital: cap, avgRiskPct: 0, openRisk: 0, open: [] },
+      { totalCapital: cap, riskPerTradePct: 1.5 },
+    );
+    expect(out.warnAt).toBe(1.5 * RISK_MULTIPLIERS.warn);
+    expect(out.dangerAt).toBe(1.5 * RISK_MULTIPLIERS.danger);
+    expect(out.target).toBe(1.5);
+  });
+
+  test("warn message references the per-trade target as the source", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: 4,
+        openRisk: 40000,
+        open: [{}, {}],
+      },
+      { totalCapital: cap, riskPerTradePct: 1 },
+    );
+    expect(out.level).toBe("warn");
+    expect(out.message).toMatch(/3× your 1% per-trade target/i);
+  });
+
+  test("danger message references the per-trade target as the source", () => {
+    const out = assessRisk(
+      {
+        latestCapital: cap,
+        avgRiskPct: 7,
+        openRisk: 70000,
+        open: [{}, {}, {}],
+      },
+      { totalCapital: cap, riskPerTradePct: 1 },
+    );
+    expect(out.level).toBe("danger");
+    expect(out.message).toMatch(/6× your 1% per-trade target/i);
+    expect(out.message).toMatch(/trim/i);
+  });
+
+  test("zero / negative / non-numeric target falls back to hardcoded thresholds", () => {
+    const m = {
+      latestCapital: cap,
+      avgRiskPct: 3,
+      openRisk: 30000,
+      open: [{}],
+    };
+    // 0 → fallback (3% > 2% warn-fallback → warn)
+    expect(
+      assessRisk(m, { riskPerTradePct: 0 }).warnAt,
+    ).toBe(RISK_THRESHOLDS.warn);
+    expect(
+      assessRisk(m, { riskPerTradePct: -1 }).warnAt,
+    ).toBe(RISK_THRESHOLDS.warn);
+    expect(
+      assessRisk(m, { riskPerTradePct: "abc" }).warnAt,
+    ).toBe(RISK_THRESHOLDS.warn);
+  });
+});
+
+describe("equityCurve", () => {
+  test("returns empty array for empty input", () => {
+    expect(equityCurve([])).toEqual([]);
+    expect(equityCurve(null)).toEqual([]);
+    expect(equityCurve(undefined)).toEqual([]);
+  });
+
+  test("returns empty array when nothing has been exited yet", () => {
+    expect(
+      equityCurve([
+        { entryPrice: 100, qty: 10, status: "Open", exits: [] },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("buckets exit legs by their leg date", () => {
+    const out = equityCurve([
+      {
+        entryPrice: 100,
+        qty: 100,
+        exits: [
+          { price: 110, qty: 50, date: "2025-01-10" }, // +500
+          { price: 120, qty: 50, date: "2025-01-15" }, // +1000
+        ],
+      },
+    ]);
+    expect(out).toEqual([
+      { date: "2025-01-10", daily: 500, cumulative: 500 },
+      { date: "2025-01-15", daily: 1000, cumulative: 1500 },
+    ]);
+  });
+
+  test("sums multiple legs that share the same date into one bucket", () => {
+    const out = equityCurve([
+      {
+        entryPrice: 100,
+        qty: 100,
+        exits: [
+          { price: 110, qty: 50, date: "2025-01-10" }, // +500
+          { price: 105, qty: 50, date: "2025-01-10" }, // +250
+        ],
+      },
+    ]);
+    expect(out).toEqual([{ date: "2025-01-10", daily: 750, cumulative: 750 }]);
+  });
+
+  test("sorts dates chronologically regardless of input order", () => {
+    const out = equityCurve([
+      {
+        entryPrice: 100,
+        qty: 100,
+        exits: [{ price: 120, qty: 50, date: "2025-03-01" }], // +1000
+      },
+      {
+        entryPrice: 50,
+        qty: 100,
+        exits: [{ price: 60, qty: 50, date: "2025-01-01" }], // +500
+      },
+      {
+        entryPrice: 200,
+        qty: 50,
+        exits: [{ price: 190, qty: 50, date: "2025-02-01" }], // -500
+      },
+    ]);
+    expect(out.map((d) => d.date)).toEqual([
+      "2025-01-01",
+      "2025-02-01",
+      "2025-03-01",
+    ]);
+    expect(out.map((d) => d.cumulative)).toEqual([500, 0, 1000]);
+  });
+
+  test("falls back to trade.exitDate, then trade.date, when leg date is missing", () => {
+    const out = equityCurve([
+      {
+        entryPrice: 100,
+        qty: 50,
+        date: "2025-01-01",
+        exitDate: "2025-02-01",
+        exits: [{ price: 110, qty: 50, date: "" }], // uses exitDate
+      },
+    ]);
+    expect(out).toEqual([{ date: "2025-02-01", daily: 500, cumulative: 500 }]);
+  });
+
+  test("legacy closed row (no leg JSON) attributes P&L to exitDate", () => {
+    const out = equityCurve([
+      {
+        status: "Closed",
+        entryPrice: 100,
+        qty: 50,
+        exitPrice: 90,
+        exitDate: "2025-01-15",
+        exits: [],
+      },
+    ]);
+    expect(out).toEqual([
+      { date: "2025-01-15", daily: -500, cumulative: -500 },
+    ]);
+  });
+
+  test("legacy Open row with no exit data is silently skipped (no NaN)", () => {
+    expect(
+      equityCurve([
+        {
+          status: "Open",
+          entryPrice: 100,
+          qty: 50,
+          exitPrice: 0,
+          exits: [],
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  test("partial exit on still-Open trade contributes only the booked portion", () => {
+    const out = equityCurve([
+      {
+        status: "Open",
+        entryPrice: 100,
+        qty: 200,
+        exits: [{ price: 120, qty: 50, date: "2025-02-15" }], // +1000
+      },
+    ]);
+    expect(out).toEqual([
+      { date: "2025-02-15", daily: 1000, cumulative: 1000 },
+    ]);
+  });
+
+  test("cumulative sum can swing negative then back positive", () => {
+    const out = equityCurve([
+      {
+        entryPrice: 100,
+        qty: 100,
+        exits: [{ price: 80, qty: 100, date: "2025-01-05" }], // -2000
+      },
+      {
+        entryPrice: 50,
+        qty: 100,
+        exits: [{ price: 80, qty: 100, date: "2025-01-10" }], // +3000
+      },
+    ]);
+    expect(out.map((d) => d.cumulative)).toEqual([-2000, 1000]);
+  });
+
+  test("skips malformed legs and null trades without crashing", () => {
+    const out = equityCurve([
+      null,
+      {
+        entryPrice: 100,
+        qty: 30,
+        exits: [
+          null,
+          { price: 110, qty: 10, date: "2025-01-01" }, // +100
+          { price: "abc", qty: 10, date: "2025-01-01" }, // skipped
+          { price: 0, qty: 10, date: "2025-01-01" }, // skipped (price 0)
+        ],
+      },
+    ]);
+    expect(out).toEqual([{ date: "2025-01-01", daily: 100, cumulative: 100 }]);
+  });
+
+  test("never includes LTP — purely realized P&L", () => {
+    // Open trade with LTP set but no exits → must NOT appear on the curve.
+    expect(
+      equityCurve([
+        { status: "Open", entryPrice: 100, qty: 50, ltp: 200, exits: [] },
+      ]),
+    ).toEqual([]);
   });
 });

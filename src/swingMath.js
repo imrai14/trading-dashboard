@@ -160,6 +160,143 @@ export function validateTradeDates(form, options = {}) {
   return null;
 }
 
+// Equity curve: realized P&L bucketed by date, plus a running cumulative
+// total. Returns an array sorted chronologically:
+//   [{ date: "YYYY-MM-DD", daily: number, cumulative: number }, ...]
+//
+// Per-leg attribution: each exit leg contributes (legPrice − entryAvg) ×
+// legQty on the leg's `date`. For legs missing a date we fall back to the
+// trade's `exitDate`, then to the trade's entry `date`. Legacy closed
+// rows (no leg JSON, but exitPrice > 0) contribute (exitPrice − entry) ×
+// qty on the trade's exitDate.
+//
+// LTP / unrealized values are deliberately NOT included — this is your
+// BOOKED-cash curve, the same number that shows up in the Realized P&L
+// tile, but spread across time.
+export function equityCurve(trades) {
+  const list = Array.isArray(trades) ? trades : [];
+  const byDate = new Map(); // date → daily P&L
+
+  const add = (date, amount) => {
+    if (!date || !Number.isFinite(amount) || amount === 0) return;
+    byDate.set(date, (byDate.get(date) || 0) + amount);
+  };
+
+  for (const t of list) {
+    if (!t) continue;
+    const entry = Number(t.entryPrice) || 0;
+    const legs = Array.isArray(t.exits) ? t.exits : [];
+    if (legs.length > 0) {
+      for (const l of legs) {
+        if (!l) continue;
+        const p = Number(l.price);
+        const q = Number(l.qty);
+        if (!Number.isFinite(p) || !Number.isFinite(q) || p <= 0 || q <= 0) {
+          continue;
+        }
+        const legDate = l.date || t.exitDate || t.date || "";
+        add(legDate, (p - entry) * q);
+      }
+    } else if (
+      String(t.status || "").toLowerCase() === "closed" &&
+      Number(t.exitPrice) > 0 &&
+      Number(t.qty) > 0
+    ) {
+      const exitP = Number(t.exitPrice);
+      const qty = Number(t.qty);
+      add(t.exitDate || t.date || "", (exitP - entry) * qty);
+    }
+  }
+
+  const sorted = [...byDate.entries()].sort(([a], [b]) =>
+    a.localeCompare(b),
+  );
+  let running = 0;
+  return sorted.map(([date, daily]) => {
+    running += daily;
+    return { date, daily, cumulative: running };
+  });
+}
+
+// Fallback thresholds used when the user hasn't set a per-trade risk
+// target yet. Percent-of-capital. Conservative defaults for swing
+// trading — tune at the source if your style differs.
+export const RISK_THRESHOLDS = { warn: 2, danger: 5 };
+
+// When the user HAS set a per-trade risk target via Settings, the banner
+// scales its thresholds to multiples of that target instead of using the
+// hardcoded fallback. So a 1% target warns at 3% and goes red at 6%; a
+// 2% target warns at 6% and goes red at 12%. The math is:
+//   warn-at = target × RISK_MULTIPLIERS.warn
+//   danger-at = target × RISK_MULTIPLIERS.danger
+export const RISK_MULTIPLIERS = { warn: 3, danger: 6 };
+
+// Inspect a `computeMetrics` result and decide whether a risk-warning
+// banner should be shown above the dashboard tiles. Returns:
+//   { level: "ok"    , message: null   } — no banner
+//   { level: "warn"  , message: string } — amber banner
+//   { level: "danger", message: string } — red banner
+//
+// `settings.riskPerTradePct` (when > 0) is used as the per-trade target.
+// Threshold computation is exposed via the returned `warnAt`/`dangerAt`
+// fields so callers can also display the active limits.
+//
+// Pure function — unit-testable without dragging in React. Returns "ok"
+// silently when capital is missing/zero so a user who hasn't set capital
+// yet doesn't see noise.
+export function assessRisk(metrics, settings) {
+  const target = Number(settings && settings.riskPerTradePct) || 0;
+  const warnAt =
+    target > 0 ? target * RISK_MULTIPLIERS.warn : RISK_THRESHOLDS.warn;
+  const dangerAt =
+    target > 0 ? target * RISK_MULTIPLIERS.danger : RISK_THRESHOLDS.danger;
+
+  if (!metrics || !metrics.latestCapital || metrics.latestCapital <= 0) {
+    return { level: "ok", message: null, warnAt, dangerAt, target };
+  }
+  const pct = Number(metrics.avgRiskPct) || 0;
+  const openRisk = Number(metrics.openRisk) || 0;
+  const openCount = Array.isArray(metrics.open) ? metrics.open.length : 0;
+  const fmtPct = pct.toFixed(2);
+  const inrRisk = `₹${Math.round(openRisk).toLocaleString("en-IN")}`;
+  const tradeWord = openCount === 1 ? "trade" : "trades";
+
+  // Tail copy that explains where the threshold came from — makes the
+  // banner self-documenting when the user starts wondering why it fired.
+  const sourceSuffix =
+    target > 0
+      ? ` (${RISK_MULTIPLIERS.danger}× your ${target}% per-trade target).`
+      : ` danger line.`;
+  const warnSuffix =
+    target > 0
+      ? ` (${RISK_MULTIPLIERS.warn}× your ${target}% per-trade target).`
+      : ` comfort threshold.`;
+
+  if (pct >= dangerAt) {
+    return {
+      level: "danger",
+      message:
+        `Risk on open positions is ${fmtPct}% of capital (${inrRisk} across ${openCount} ${tradeWord}) ` +
+        `— above the ${dangerAt}%${sourceSuffix} Consider trimming size.`,
+      warnAt,
+      dangerAt,
+      target,
+    };
+  }
+  if (pct >= warnAt) {
+    return {
+      level: "warn",
+      message:
+        `Risk on open positions is ${fmtPct}% of capital (${inrRisk} across ${openCount} ${tradeWord}) ` +
+        `— above the ${warnAt}%${warnSuffix}`,
+      warnAt,
+      dangerAt,
+      target,
+    };
+  }
+  return { level: "ok", message: null, warnAt, dangerAt, target };
+}
+
 // The big aggregation. Returns every metric the dashboard tiles need.
 export function computeMetrics(trades, settings) {
   const open = trades.filter((t) => t.status?.toLowerCase() === "open");

@@ -3,6 +3,9 @@ import { BrowserRouter, Routes, Route, Link } from "react-router-dom";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid, ReferenceLine } from "recharts";
 import * as XLSX from "xlsx";
 import SwingTracker from "./SwingTracker";
+import { parseDhanCSV } from "./dhanParser";
+
+export { parseDhanCSV };
 
 // ─── Palette ────────────────────────────────────────────────
 const C = {
@@ -23,70 +26,6 @@ const C = {
   sub: "#7880a0",
   muted: "#3a4060",
 };
-
-// ─── DHAN CSV Parser ─────────────────────────────────────────
-function parseDhanCSV(text) {
-  const lines = text.split(/\r?\n/);
-  let headerIdx = lines.findIndex(l => l.includes("Scrip Name"));
-  if (headerIdx === -1) return null;
-
-  const trades = [];
-  for (let i = headerIdx + 1; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line || line.startsWith("Net P&L") || line.startsWith("NOTE")) continue;
-    const row = line.match(/(".*?"|[^,]+)(?=,|$)/g)?.map(v => v.replace(/^"|"$/g, "").replace(/,/g, ""));
-    if (!row || row.length < 10) continue;
-    try {
-      const pnl = parseFloat(row[8]);
-      const pnlPct = parseFloat(row[9]);
-      if (isNaN(pnl)) continue;
-      const buyQty = parseFloat(row[1]);
-      const sellQty = parseFloat(row[4]);
-      trades.push({
-        broker: "DHAN",
-        name: row[0],
-        qty: sellQty || buyQty || 0,
-        buyQty,
-        avgBuy: parseFloat(row[2]),
-        buyVal: parseFloat(row[3]),
-        sellQty,
-        avgSell: parseFloat(row[5]),
-        sellVal: parseFloat(row[6]),
-        pnl,
-        pnlPct,
-      });
-    } catch {}
-  }
-
-  const summaryLine = lines.find(l => l.startsWith("Net P&L"));
-  let netPnl = 0, brokerage = 0, grossPnl = 0, totalCharges = 0;
-  if (summaryLine) {
-    const parts = summaryLine.split(",");
-    netPnl = parseFloat(parts[1]) || 0;
-    brokerage = parseFloat(parts[3]) || 0;
-    grossPnl = parseFloat(parts[5]) || 0;
-    totalCharges = parseFloat(parts[7]) || 0;
-  }
-
-  const headerLine = lines[0] || "";
-  const dateMatch = headerLine.match(/From (.+?) to (.+)/);
-  const dateRange = dateMatch ? `${dateMatch[1]} – ${dateMatch[2]}` : "Period";
-
-  // Dhan only exposes brokerage + a lumped "other charges" in the summary row,
-  // so the breakdown is intentionally coarse.
-  const otherCharges = Math.max(0, totalCharges - brokerage);
-  const chargesBreakdown = [
-    { label: "Brokerage", amount: brokerage },
-    { label: "STT / Exchange / Other", amount: otherCharges },
-  ].filter(x => x.amount > 0);
-
-  return {
-    broker: "DHAN",
-    trades, holdings: [], chargesBreakdown,
-    netPnl, brokerage, grossPnl, totalCharges, unrealizedPnl: 0,
-    dateRange,
-  };
-}
 
 // ─── Zerodha XLSX Parser ─────────────────────────────────────
 function parseZerodhaXLSX(arrayBuffer) {
